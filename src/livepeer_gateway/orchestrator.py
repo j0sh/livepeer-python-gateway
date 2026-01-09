@@ -24,6 +24,54 @@ from .errors import LivepeerGatewayError
 _HEX_RE = re.compile(r"^(0x)?[0-9a-fA-F]*$")
 
 
+def _truncate(s: str, max_len: int = 2000) -> str:
+    if len(s) <= max_len:
+        return s
+    return s[:max_len] + f"...(+{len(s) - max_len} chars)"
+
+def _http_error_body(e: HTTPError) -> str:
+    """
+    Best-effort read of an HTTPError response body for debugging.
+    """
+    try:
+        b = e.read()
+        if not b:
+            return ""
+        if isinstance(b, bytes):
+            return b.decode("utf-8", errors="replace")
+        return str(b)
+    except Exception:
+        return ""
+
+def _extract_error_message(e: HTTPError) -> str:
+    """
+    Best-effort extraction of a useful error message from an HTTPError body.
+
+    If the body is JSON and matches {"error": {"message": "..."}}, return that message.
+    Otherwise return the full body.
+
+    Always truncates the returned value for readability.
+    """
+    body = _http_error_body(e)
+    s = body.strip()
+    if not s:
+        return ""
+
+    try:
+        data = json.loads(s)
+    except Exception:
+        return _truncate(body)
+
+    if isinstance(data, dict):
+        err = data.get("error")
+        if isinstance(err, dict):
+            msg = err.get("message")
+            if isinstance(msg, str) and msg:
+                return _truncate(msg)
+
+    return _truncate(body)
+
+
 def post_json(
     url: str,
     payload: dict[str, Any],
@@ -55,7 +103,11 @@ def post_json(
             raw = resp.read().decode("utf-8")
         data: Any = json.loads(raw)
     except HTTPError as e:
-        raise LivepeerGatewayError(f"HTTP JSON error: HTTP {e.code} from endpoint (url={url})") from e
+        body = _extract_error_message(e)
+        body_part = f"; body={body!r}" if body else ""
+        raise LivepeerGatewayError(
+            f"HTTP JSON error: HTTP {e.code} from endpoint (url={url}){body_part}"
+        ) from e
     except ConnectionRefusedError as e:
         raise LivepeerGatewayError(
             f"HTTP JSON error: connection refused (is the server running? is the host/port correct?) (url={url})"
@@ -331,20 +383,13 @@ def _get_signer_material(signer_base_url: str) -> SignerMaterial:
     Fetch signer material exactly once per signer_base_url for the lifetime of the process.
     Subsequent calls return cached data.
     """
-    signer_url = f"{_normalize_https_base_url(signer_base_url)}/sign-orchestrator-info"
-    req = Request(
-        signer_url,
-        headers={
-            "Accept": "application/json",
-            "User-Agent": "livepeer-python-gateway/0.1",
-        },
-        method="POST",
-    )
+    # Accept either a base URL or a full URL that includes /sign-orchestrator-info.
+    # Normalize to an https:// origin and append the expected path.
+    signer_url = f"{_normalize_https_origin(signer_base_url)}/sign-orchestrator-info"
 
     try:
-        with urlopen(req, timeout=5.0) as resp:
-            body = resp.read().decode("utf-8")
-        data = json.loads(body)
+        # Some signers accept/expect POST with an empty JSON object.
+        data = post_json(signer_url, {}, timeout=5.0)
 
         # Expected response shape (example):
         # {
@@ -361,36 +406,45 @@ def _get_signer_material(signer_base_url: str) -> SignerMaterial:
         address = _hex_to_bytes(str(data["address"]), expected_len=20)
         sig = _hex_to_bytes(str(data["signature"]))  # signature length may vary
 
-    except ConnectionRefusedError as e:
+    except LivepeerGatewayError as e:
+        # post_json wraps the underlying exception as __cause__; convert back into
+        # a signer-specific error message.
+        cause = e.__cause__ or e
+
+        if isinstance(cause, HTTPError):
+            body = _extract_error_message(cause)
+            body_part = f"; body={body!r}" if body else ""
+            raise RemoteSignerError(
+                signer_url,
+                f"HTTP {cause.code} from signer{body_part}",
+                cause=cause,
+            ) from None
+
+        if isinstance(cause, ConnectionRefusedError):
+            raise RemoteSignerError(
+                signer_url,
+                "connection refused (is the signer running? is the host/port correct?)",
+                cause=cause,
+            ) from None
+
+        if isinstance(cause, URLError):
+            raise RemoteSignerError(
+                signer_url,
+                f"failed to reach signer: {getattr(cause, 'reason', cause)}",
+                cause=cause,
+            ) from None
+
+        if isinstance(cause, json.JSONDecodeError):
+            raise RemoteSignerError(
+                signer_url,
+                f"signer did not return valid JSON: {cause}",
+                cause=cause,
+            ) from None
+
         raise RemoteSignerError(
             signer_url,
-            "connection refused (is the signer running? is the host/port correct?)",
-            cause=e,
-        ) from None
-    except HTTPError as e:
-        raise RemoteSignerError(
-            signer_url,
-            f"HTTP {e.code} from signer",
-            cause=e,
-        ) from None
-    except URLError as e:
-        # Includes DNS failures, refused connections wrapped as URLError, timeouts, etc.
-        raise RemoteSignerError(
-            signer_url,
-            f"failed to reach signer: {getattr(e, 'reason', e)}",
-            cause=e,
-        ) from None
-    except json.JSONDecodeError as e:
-        raise RemoteSignerError(
-               signer_url,
-               f"signer did not return valid JSON: {e}",
-               cause=e,
-        ) from None
-    except Exception as e:
-        raise RemoteSignerError(
-            signer_url,
-            f"unexpected error: {e.__class__.__name__}: {e}",
-            cause=e,
+            f"unexpected error: {cause.__class__.__name__}: {cause}",
+            cause=cause if isinstance(cause, BaseException) else e,
         ) from None
 
     return SignerMaterial(address=address, sig=sig)
@@ -429,7 +483,15 @@ class OrchestratorClient:
                 "Pass signer_url=... or set LIVEPEER_SIGNER_URL."
             )
 
-        signer = _get_signer_material(self.signer_url)
+        try:
+            signer = _get_signer_material(self.signer_url)
+        except Exception as e:
+            # Ensure caller sees a clean library error (no raw traceback).
+            raise OrchestratorRpcError(
+                self.orch_url,
+                f"{e.__class__.__name__}: {e}",
+                cause=e,
+            ) from None
 
         request = lp_rpc_pb2.OrchestratorRequest(
             address=signer.address,
