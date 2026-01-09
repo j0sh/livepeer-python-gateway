@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+import ipaddress
 import re
+import socket
+import ssl
+import tempfile
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Optional
+from typing import Optional, Tuple
 from urllib.error import URLError, HTTPError
 from urllib.request import Request, urlopen
 
@@ -42,6 +46,113 @@ def _hex_to_bytes(s: str, *, expected_len: Optional[int] = None) -> bytes:
     if expected_len is not None and len(b) != expected_len:
         raise ValueError(f"Expected {expected_len} bytes, got {len(b)} bytes")
     return b
+
+
+def _split_host_port(target: str) -> Tuple[str, int]:
+    """
+    Parse a gRPC target in the form "host:port" or "[ipv6]:port".
+    """
+    target = target.strip()
+    if target.startswith("["):
+        # [::1]:8935
+        host, rest = target[1:].split("]", 1)
+        if not rest.startswith(":"):
+            raise ValueError(f"Invalid gRPC target (missing port): {target!r}")
+        return host, int(rest[1:])
+
+    # host:port (we don't support bare host here)
+    if target.count(":") != 1:
+        raise ValueError(f"Invalid gRPC target (expected host:port): {target!r}")
+    host, port_s = target.split(":", 1)
+    return host, int(port_s)
+
+
+def _is_ip_address(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
+
+
+def _pick_cert_authority(cert: dict) -> Optional[str]:
+    """
+    Choose an authority value that will satisfy gRPC hostname verification.
+    Prefers DNS SAN, then IP SAN, then Common Name.
+    """
+    san = cert.get("subjectAltName") or []
+    for typ, val in san:
+        if typ == "DNS" and val:
+            return val
+    for typ, val in san:
+        if typ in ("IP Address", "IP") and val:
+            return val
+
+    # subject is a tuple of RDN tuples: ((('commonName','example.com'),), ...)
+    for rdn in cert.get("subject") or []:
+        for key, val in rdn:
+            if key == "commonName" and val:
+                return val
+    return None
+
+
+def _decode_pem_cert(pem: bytes) -> dict:
+    """
+    Decode a PEM cert into a dict containing subject / subjectAltName.
+
+    Note: Python's `SSLSocket.getpeercert()` returns `{}` when verify_mode=CERT_NONE,
+    so we decode the PEM ourselves via a CPython helper.
+    """
+    try:
+        decode = ssl._ssl._test_decode_cert  # pyright: ignore[reportAttributeAccessIssue]
+    except Exception:
+        return {}
+
+    tmp_path: Optional[str] = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="wb", delete=False) as f:
+            f.write(pem)
+            tmp_path = f.name
+        return decode(tmp_path) or {}
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
+@lru_cache(maxsize=None)
+def _trust_on_first_use_root_cert(target: str) -> Tuple[bytes, str]:
+    """
+    Fetch the server certificate via a TLS handshake with verification disabled,
+    then "trust" that exact certificate by using it as the root cert for gRPC.
+
+    Returns (root_cert_pem_bytes, authority_override).
+    """
+    host, port = _split_host_port(target)
+
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    # gRPC requires HTTP/2; many gRPC-TLS servers expect ALPN "h2" in the ClientHello.
+    try:
+        ctx.set_alpn_protocols(["h2"])
+    except NotImplementedError:
+        # Some Python/OpenSSL builds may not support ALPN; best effort.
+        pass
+
+    # Only send SNI for DNS names; IP SNI can trigger "Invalid server name indication".
+    server_hostname = None if _is_ip_address(host) else host
+
+    with socket.create_connection((host, port), timeout=5.0) as sock:
+        with ctx.wrap_socket(sock, server_hostname=server_hostname) as ssock:
+            der = ssock.getpeercert(binary_form=True)
+
+    pem = ssl.DER_cert_to_PEM_cert(der).encode("ascii")
+    decoded = _decode_pem_cert(pem)
+    authority = _pick_cert_authority(decoded) or host
+    return pem, authority
 
 
 @lru_cache(maxsize=None)
@@ -120,16 +231,20 @@ class OrchestratorClient:
         orch_url: str,
         *,
         signer_url: Optional[str] = None,
-        insecure: bool = True,
     ) -> None:
         self.orch_url = orch_url
         self.signer_url = signer_url or os.getenv("LIVEPEER_SIGNER_URL")
 
-        if insecure:
-            self._channel = grpc.insecure_channel(orch_url)
-        else:
-            raise NotImplementedError("Secure channel not implemented yet")
-
+        # Always use TLS. "Ignore" invalid/self-signed certs by trusting the exact
+        # certificate the server presents (trust-on-first-use) and overriding the
+        # expected authority to match that cert.
+        root_pem, authority = _trust_on_first_use_root_cert(orch_url)
+        credentials = grpc.ssl_channel_credentials(root_certificates=root_pem)
+        options = [
+            ("grpc.ssl_target_name_override", authority),
+            ("grpc.default_authority", authority),
+        ]
+        self._channel = grpc.secure_channel(orch_url, credentials, options=options)
         self._stub = lp_rpc_pb2_grpc.OrchestratorStub(self._channel)
 
     def GetOrchestratorInfo(self) -> lp_rpc_pb2.OrchestratorInfo:
@@ -160,6 +275,7 @@ def GetOrchestratorInfo(orch_url: str, *, signer_url: Optional[str] = None) -> l
     Public functional API:
         GetOrchestratorInfo(orch_url, signer_url=...)
     Remote signer is called once per process (cached).
+    Always uses secure channel (TLS) with certificate verification disabled.
     """
     return OrchestratorClient(orch_url, signer_url=signer_url).GetOrchestratorInfo()
 
