@@ -67,17 +67,17 @@ def _get_signer_material(signer_url: str) -> SignerMaterial:
         # Expected response shape (example):
         # {
         #   "address": "0x0123...abcd",   # 20-byte ETH address hex
-        #   "sig": "0x..."               # signature hex
+        #   "signature": "0x..."          # signature hex
         # }
-        if "address" not in data or "sig" not in data:
+        if "address" not in data or "signature" not in data:
             raise RemoteSignerError(
                     signer_url,
-                    f"Remote signer JSON must contain 'address' and 'sig': {data!r}",
-                    cause=e,
+                    f"Remote signer JSON must contain 'address' and 'signature': {data!r}",
+                    cause=None,
             ) from None
 
         address = _hex_to_bytes(str(data["address"]), expected_len=20)
-        sig = _hex_to_bytes(str(data["sig"]))  # signature length may vary
+        sig = _hex_to_bytes(str(data["signature"]))  # signature length may vary
 
     except ConnectionRefusedError as e:
         raise RemoteSignerError(
