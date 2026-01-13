@@ -197,8 +197,23 @@ class StartJobRequest:
 
 @dataclass(frozen=True)
 class StartJobResponse:
-    # Will be filled in after we observe a real response schema.
     raw: dict[str, Any]
+    manifest_id: Optional[str] = None
+    publish_url: Optional[str] = None
+    subscribe_url: Optional[str] = None
+    control_url: Optional[str] = None
+    events_url: Optional[str] = None
+
+    @staticmethod
+    def from_json(data: dict[str, Any]) -> "StartJobResponse":
+        return StartJobResponse(
+            raw=data,
+            control_url=data.get("control_url") if isinstance(data.get("control_url"), str) else None,
+            events_url=data.get("events_url") if isinstance(data.get("events_url"), str) else None,
+            manifest_id=data.get("manifest_id") if isinstance(data.get("manifest_id"), str) else None,
+            publish_url=data.get("publish_url") if isinstance(data.get("publish_url"), str) else None,
+            subscribe_url=data.get("subscribe_url") if isinstance(data.get("subscribe_url"), str) else None,
+        )
 
 
 @dataclass(frozen=True)
@@ -277,7 +292,7 @@ def StartJob(
     base = _normalize_https_base_url(info.transcoder)
     url = f"{base}/live-video-to-video"
     data = post_json(url, req.to_json(), headers=headers)
-    return StartJobResponse(raw=data)
+    return StartJobResponse.from_json(data)
 
 @dataclass(frozen=True)
 class SignerMaterial:
