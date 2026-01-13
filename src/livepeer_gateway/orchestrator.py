@@ -173,10 +173,8 @@ def _normalize_https_origin(url: str) -> str:
 
 @dataclass(frozen=True)
 class StartJobRequest:
-    # GatewayRequestId The ID of the Gateway request (for logging purposes).
-    gateway_request_id: Optional[str] = None
-    # ManifestId The manifest ID from the orchestrator (for logging purposes).
-    manifest_id: Optional[str] = None
+    # The ID of the Gateway request (for logging purposes).
+    request_id: Optional[str] = None
     # ModelId Name of the pipeline to run in the live video to video job.
     model_id: Optional[str] = None
     # Params Initial parameters for the pipeline.
@@ -186,10 +184,8 @@ class StartJobRequest:
 
     def to_json(self) -> dict[str, Any]:
         payload: dict[str, Any] = {}
-        if self.gateway_request_id is not None:
-            payload["gateway_request_id"] = self.gateway_request_id
-        if self.manifest_id is not None:
-            payload["manifest_id"] = self.manifest_id
+        if self.request_id is not None:
+            payload["gateway_request_id"] = self.request_id
         if self.model_id is not None:
             payload["model_id"] = self.model_id
         if self.params is not None:
