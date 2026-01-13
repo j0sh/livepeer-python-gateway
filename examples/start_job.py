@@ -10,10 +10,10 @@ DEFAULT_MODEL_ID = "noop" # fix
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Fetch orchestrator info via Livepeer gRPC.")
     p.add_argument(
-        "orchestrators",
-        nargs="*",
-        default=[DEFAULT_ORCH],
-        help=f"One or more orchestrator gRPC targets (host:port). Default: {DEFAULT_ORCH}",
+        "orchestrator",
+        nargs="?",
+        default=DEFAULT_ORCH,
+        help=f"Orchestrator gRPC target (host:port). Default: {DEFAULT_ORCH}",
     )
     p.add_argument(
         "--signer-url",
@@ -30,32 +30,32 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
 
-    for orch_url in args.orchestrators:
-        try:
-            info = GetOrchestratorInfo(orch_url, signer_url=args.signer_url)
+    orch_url = args.orchestrator
+    try:
+        info = GetOrchestratorInfo(orch_url, signer_url=args.signer_url)
 
-            print("=== OrchestratorInfo ===")
-            print("Orchestrator:", orch_url)
-            print("Transcoder URI:", info.transcoder)
-            print("ETH Address:", info.address.hex())
-            print()
+        print("=== OrchestratorInfo ===")
+        print("Orchestrator:", orch_url)
+        print("Transcoder URI:", info.transcoder)
+        print("ETH Address:", info.address.hex())
+        print()
 
-            url = info.transcoder
-            job = StartJob(
-                info,
-                StartJobRequest(
-                    model_id=args.model_id,
-                ),
-                signer_base_url=args.signer_url,
-            )
-            print("=== StartJob ===")
-            print("Endpoint:", f"{url}/live-video-to-video")
-            print(json.dumps(job.raw, indent=2, sort_keys=True))
-            print()
+        url = info.transcoder
+        job = StartJob(
+            info,
+            StartJobRequest(
+                model_id=args.model_id,
+            ),
+            signer_base_url=args.signer_url,
+        )
+        print("=== StartJob ===")
+        print("Endpoint:", f"{url}/live-video-to-video")
+        print(json.dumps(job.raw, indent=2, sort_keys=True))
+        print()
 
-        except LivepeerGatewayError as e:
-            print(f"ERROR ({orch_url}): {e}")
-            print()
+    except LivepeerGatewayError as e:
+        print(f"ERROR ({orch_url}): {e}")
+        print()
 
 if __name__ == "__main__":
     main()
