@@ -57,12 +57,15 @@ async def main() -> None:
         print("control_url:", job.control_url)
         print()
 
+        if not job.control:
+            raise LivepeerGatewayError("No control_url present on this LiveVideoToVideo job")
+
         msg = json.loads(args.message)
         if not isinstance(msg, dict):
             raise ValueError("--message must be a JSON object")
 
         for i in range(max(0, args.count)):
-            await job.write_control({**msg, "n": i})
+            await job.control.write_control({**msg, "n": i})
             if i + 1 < args.count:
                 await asyncio.sleep(args.interval)
 
@@ -72,7 +75,8 @@ async def main() -> None:
         try:
             # Best-effort (no-op if control was never opened).
             if "job" in locals():
-                await job.close_control()
+                if job.control:
+                    await job.control.close_control()
         except Exception:
             pass
 
