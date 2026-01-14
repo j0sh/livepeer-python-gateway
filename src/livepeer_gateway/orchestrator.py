@@ -21,6 +21,7 @@ from . import lp_rpc_pb2
 from . import lp_rpc_pb2_grpc
 
 from .control import Control
+from .media_publish import MediaPublish
 from .errors import LivepeerGatewayError
 
 _HEX_RE = re.compile(r"^(0x)?[0-9a-fA-F]*$")
@@ -204,19 +205,23 @@ class LiveVideoToVideo:
     control_url: Optional[str] = None
     events_url: Optional[str] = None
     control: Optional[Control] = None
+    media: Optional[MediaPublish] = None
 
     @staticmethod
     def from_json(data: dict[str, Any]) -> "LiveVideoToVideo":
         control_url = data.get("control_url") if isinstance(data.get("control_url"), str) else None
         control = Control(control_url) if control_url else None
+        publish_url = data.get("publish_url") if isinstance(data.get("publish_url"), str) else None
+        media = MediaPublish(publish_url) if publish_url else None
         return LiveVideoToVideo(
             raw=data,
             control_url=control_url,
             events_url=data.get("events_url") if isinstance(data.get("events_url"), str) else None,
             manifest_id=data.get("manifest_id") if isinstance(data.get("manifest_id"), str) else None,
-            publish_url=data.get("publish_url") if isinstance(data.get("publish_url"), str) else None,
+            publish_url=publish_url,
             subscribe_url=data.get("subscribe_url") if isinstance(data.get("subscribe_url"), str) else None,
             control=control,
+            media=media,
         )
 
 
