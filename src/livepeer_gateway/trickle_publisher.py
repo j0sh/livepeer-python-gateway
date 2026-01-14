@@ -29,9 +29,8 @@ class TricklePublisher:
         self._lock: Optional[asyncio.Lock] = None
         self._session: Optional[aiohttp.ClientSession] = None
 
-        # Preconnected writer future for the next segment. The future is resolved
-        # only when the preconnect POST receives an HTTP 200 response.
-        self._next_writer: Optional[asyncio.Future[asyncio.Queue[Optional[bytes]]]] = None
+        # Preconnected writer queue for the next segment.
+        self._next_writer: Optional[asyncio.Queue[Optional[bytes]]] = None
 
     async def __aenter__(self) -> "TricklePublisher":
         return self
@@ -50,28 +49,21 @@ class TricklePublisher:
     def _stream_url(self, seq: int) -> str:
         return f"{self.url}/{seq}"
 
-    def _preconnect(self, seq: int) -> asyncio.Future[asyncio.Queue[Optional[bytes]]]:
+    async def preconnect(self, seq: int) -> asyncio.Queue[Optional[bytes]]:
         """
-        Start the POST for `seq` in the background and return a Future.
-
-        The returned Future resolves to a queue that feeds the request body. It is
-        resolved only when the POST receives HTTP 200 (preconnect succeeds).
+        Start the POST for `seq` in the background and return a queue that feeds the request body.
         """
+        await self._ensure_runtime()
+        assert self._session is not None
 
         url = self._stream_url(seq)
         logging.debug("Trickle preconnect: %s", url)
 
         queue: asyncio.Queue[Optional[bytes]] = asyncio.Queue(maxsize=1)
-        fut: asyncio.Future[asyncio.Queue[Optional[bytes]]] = asyncio.get_running_loop().create_future()
-        asyncio.create_task(self._run_post(url, queue, fut))
-        return fut
+        asyncio.create_task(self._run_post(url, queue))
+        return queue
 
-    async def _run_post(
-        self,
-        url: str,
-        queue: asyncio.Queue[Optional[bytes]],
-        fut: asyncio.Future[asyncio.Queue[Optional[bytes]]],
-    ) -> None:
+    async def _run_post(self, url: str, queue: asyncio.Queue[Optional[bytes]]) -> None:
         await self._ensure_runtime()
         assert self._session is not None
 
@@ -84,25 +76,9 @@ class TricklePublisher:
             if resp.status != 200:
                 body = await resp.text()
                 logging.error("Trickle POST failed url=%s status=%s body=%r", url, resp.status, body)
-                if not fut.done():
-                    fut.set_exception(
-                        RuntimeError(f"Trickle preconnect failed: HTTP {resp.status} url={url} body={body!r}")
-                    )
-            else:
-                if not fut.done():
-                    fut.set_result(queue)
             await resp.release()
         except Exception:
             logging.error("Trickle POST exception url=%s", url, exc_info=True)
-            if not fut.done():
-                err = RuntimeError(f"Trickle preconnect exception url={url}")
-                err.__cause__ = e
-                fut.set_exception(err)
-
-        # ensure the future is *always* terminated to prevent hanging next()
-        finally:
-            if not fut.done():
-                fut.set_exception(RuntimeError("Preconnect future unresolved"))
 
     async def _run_delete(self) -> None:
         await self._ensure_runtime()
@@ -142,22 +118,26 @@ class TricklePublisher:
 
         async with self._lock:
             if self._next_writer is None:
-                self._next_writer = self._preconnect(self.seq)
+                self._next_writer = await self.preconnect(self.seq)
 
             seq = self.seq
-            fut = self._next_writer
+            queue = self._next_writer
             self._next_writer = None
 
-        # Await preconnect if necessary but outside the lock.
-        # This is so we can cancel, etc later if necessary, eg if this is stuck.
-        queue = await fut
-
-        # Preconnect the next segment.
-        async with self._lock:
+            # Preconnect the next segment in the background.
             self.seq += 1
-            self._next_writer = self._preconnect(self.seq)
+            asyncio.create_task(self._preconnect_next())
 
         return SegmentWriter(queue, seq)
+
+    async def _preconnect_next(self) -> None:
+        await self._ensure_runtime()
+        assert self._lock is not None
+
+        async with self._lock:
+            if self._next_writer is not None:
+                return
+            self._next_writer = await self.preconnect(self.seq)
 
     async def close(self) -> None:
         # If the publisher was never used, avoid creating a session just to close it.
