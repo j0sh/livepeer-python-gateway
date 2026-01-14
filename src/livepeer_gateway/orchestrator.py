@@ -24,7 +24,6 @@ from .errors import LivepeerGatewayError
 
 _HEX_RE = re.compile(r"^(0x)?[0-9a-fA-F]*$")
 
-
 def _truncate(s: str, max_len: int = 2000) -> str:
     if len(s) <= max_len:
         return s
@@ -235,6 +234,27 @@ def GetPayment(
       orchestrator: base64 protobuf bytes of net.PaymentResult containing OrchestratorInfo
       type: job type (default: lv2v)
     """
+
+    if not signer_base_url:
+        # Offchain mode: still send the expected headers, but with empty content.
+        seg = lp_rpc_pb2.SegData()
+        if not info.HasField("auth_token"):
+            raise LivepeerGatewayError(
+                "Orchestrator did not provide an auth token."
+            )
+        seg.auth_token.CopyFrom(info.auth_token)
+        seg = base64.b64encode(seg.SerializeToString()).decode("ascii")
+        return GetPaymentResponse(seg_creds=seg, payment="")
+
+    # Price info must be valid
+    has_price_info = info.HasField("price_info")
+    price_is_zero = has_price_info and info.price_info.pricePerUnit == 0
+    if not has_price_info or price_is_zero:
+        raise LivepeerGatewayError(
+            "Valid price info required when using remote signer. "
+            "The orchestrator returned missing or zero price_info."
+        )
+
     base = _normalize_https_base_url(signer_base_url)
     url = f"{base}/generate-live-payment"
 
@@ -259,34 +279,21 @@ def StartJob(
     info: lp_rpc_pb2.OrchestratorInfo,
     req: StartJobRequest,
     *,
-    signer_base_url: str,
+    signer_base_url: Optional[str] = None,
     typ: str = "lv2v",
 ) -> StartJobResponse:
     """
     Start a live video-to-video job.
 
     Calls POST {info.transcoder}/live-video-to-video with JSON body.
-    Before posting, calls GetPayment(...) and forwards results as headers:
-      - Livepeer-Payment
-      - Livepeer-Segment (optional)
     """
     if not req.model_id:
         raise LivepeerGatewayError("StartJob requires model_id")
 
-    # If using remote signer, price_info must be valid
-    if signer_base_url:
-        has_price_info = info.HasField("price_info")
-        price_is_zero = has_price_info and info.price_info.pricePerUnit == 0
-        if not has_price_info or price_is_zero:
-            raise LivepeerGatewayError(
-                "StartJob requires valid price_info in OrchestratorInfo when using remote signer. "
-                "The orchestrator returned missing or zero price_info."
-            )
-
-    payment = GetPayment(signer_base_url, info, typ=typ)
+    p = GetPayment(signer_base_url, info)
     headers: dict[str, str] = {
-        "Livepeer-Payment": payment.payment,
-        "Livepeer-Segment": payment.seg_creds,
+        "Livepeer-Payment": p.payment,
+        "Livepeer-Segment": p.seg_creds,
     }
 
     base = _normalize_https_base_url(info.transcoder)
@@ -477,6 +484,11 @@ def _get_signer_material(signer_base_url: str) -> SignerMaterial:
     Fetch signer material exactly once per signer_base_url for the lifetime of the process.
     Subsequent calls return cached data.
     """
+
+    # check for offchain mode
+    if not signer_base_url:
+        return SignerMaterial(address=None, sig=None)
+
     # Accept either a base URL or a full URL that includes /sign-orchestrator-info.
     # Normalize to an https:// origin and append the expected path.
     signer_url = f"{_normalize_https_origin(signer_base_url)}/sign-orchestrator-info"
@@ -552,7 +564,7 @@ class OrchestratorClient:
         signer_url: Optional[str] = None,
     ) -> None:
         self.orch_url = orch_url
-        self.signer_url = signer_url or os.getenv("LIVEPEER_SIGNER_URL")
+        self.signer_url = signer_url
 
         # Always use TLS. "Ignore" invalid/self-signed certs by trusting the exact
         # certificate the server presents (trust-on-first-use) and overriding the
@@ -571,12 +583,6 @@ class OrchestratorClient:
         Wrapper for the Orchestrator RPC method GetOrchestrator(...)
         but exposed as GetOrchestratorInfo() for convenience.
         """
-        if not self.signer_url:
-            raise ValueError(
-                "Remote signer URL not configured. "
-                "Pass signer_url=... or set LIVEPEER_SIGNER_URL."
-            )
-
         try:
             signer = _get_signer_material(self.signer_url)
         except Exception as e:

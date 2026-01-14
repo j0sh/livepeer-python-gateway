@@ -6,6 +6,13 @@ uv run generate-lp-rpc
 
 Examples
 
+Offchain mode (no remote signer)
 ```
 uv run examples/get_orchestrator_info.py
+```
+
+On-chain mode
+
+```
+uv run examples/get_orchestrator_info.py --signer-url "<signer-host:port>"
 ```

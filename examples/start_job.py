@@ -4,7 +4,6 @@ import json
 from livepeer_gateway.orchestrator import GetOrchestratorInfo, LivepeerGatewayError, StartJob, StartJobRequest
 
 DEFAULT_ORCH = "localhost:8935"
-DEFAULT_SIGNER_URL = "https://vyt5g5r8tu9hrv.transfix.ai"  # base URL; adjust
 DEFAULT_MODEL_ID = "noop" # fix
 
 def _parse_args() -> argparse.Namespace:
@@ -16,9 +15,9 @@ def _parse_args() -> argparse.Namespace:
         help=f"Orchestrator gRPC target (host:port). Default: {DEFAULT_ORCH}",
     )
     p.add_argument(
-        "--signer-url",
-        default=DEFAULT_SIGNER_URL,
-        help="Remote signer base URL (no path). Used for /generate-live-payment.",
+        "--signer",
+        default=None,
+        help="Remote signer base URL (no path). If omitted, runs in offchain mode.",
     )
     p.add_argument(
         "--model-id",
@@ -32,7 +31,7 @@ def main() -> None:
 
     orch_url = args.orchestrator
     try:
-        info = GetOrchestratorInfo(orch_url, signer_url=args.signer_url)
+        info = GetOrchestratorInfo(orch_url, signer_url=args.signer)
 
         print("=== OrchestratorInfo ===")
         print("Orchestrator:", orch_url)
@@ -46,7 +45,7 @@ def main() -> None:
             StartJobRequest(
                 model_id=args.model_id,
             ),
-            signer_base_url=args.signer_url,
+            signer_base_url=args.signer,
         )
         print("=== StartJob ===")
         print("Endpoint:", f"{url}/live-video-to-video")
