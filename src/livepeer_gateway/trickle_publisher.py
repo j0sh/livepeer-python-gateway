@@ -15,8 +15,9 @@ class TricklePublisher:
       - Close stream: DELETE {base_url}
 
     The API matches the usage pattern:
-      async with await publisher.next() as segment:
-          await segment.write(b"...")
+        async with TricklePublisher(url, "application/json") as pub:
+            async with await pub.next() as seg:
+                await seg.write(b"...")
     """
 
     def __init__(self, url: str, mime_type: str):
@@ -30,6 +31,12 @@ class TricklePublisher:
 
         # Preconnected writer queue for the next segment.
         self._next_queue: Optional[asyncio.Queue[Optional[bytes]]] = None
+
+    async def __aenter__(self) -> "TricklePublisher":
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback) -> None:
+        await self.close()
 
     async def _ensure_runtime(self) -> None:
         if self._lock is None:
@@ -133,6 +140,10 @@ class TricklePublisher:
             self._next_queue = await self.preconnect(self.idx)
 
     async def close(self) -> None:
+        # If the publisher was never used, avoid creating a session just to close it.
+        if self._session is None and self._lock is None and self._next_queue is None:
+            return
+
         await self._ensure_runtime()
         assert self._lock is not None
 
@@ -151,7 +162,7 @@ class TricklePublisher:
 
 
 class SegmentWriter:
-    def __init__(self, queue: asyncio.Queue[Optional[bytes]], seq: int = -1):
+    def __init__(self, queue: asyncio.Queue[Optional[bytes]], seq: int = -99):
         self.queue = queue
         self._seq = seq
 
