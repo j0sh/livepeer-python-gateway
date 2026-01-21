@@ -26,3 +26,8 @@ Capture MacOS camera frames and publish via write_frame
 ```
 uv run examples/camera_capture.py
 ```
+
+Subscribe to a LiveVideoToVideo trickle events channel
+```
+uv run examples/subscribe_events.py
+```

@@ -22,6 +22,7 @@ from . import lp_rpc_pb2
 from . import lp_rpc_pb2_grpc
 
 from .control import Control
+from .events import Events
 from .media_publish import MediaPublish, MediaPublishConfig
 from .errors import LivepeerGatewayError
 
@@ -206,6 +207,7 @@ class LiveVideoToVideo:
     control_url: Optional[str] = None
     events_url: Optional[str] = None
     control: Optional[Control] = None
+    events: Optional[Events] = None
     _media: Optional[MediaPublish] = field(default=None, repr=False, compare=False)
 
     @staticmethod
@@ -213,14 +215,17 @@ class LiveVideoToVideo:
         control_url = data.get("control_url") if isinstance(data.get("control_url"), str) else None
         control = Control(control_url) if control_url else None
         publish_url = data.get("publish_url") if isinstance(data.get("publish_url"), str) else None
+        events_url = data.get("events_url") if isinstance(data.get("events_url"), str) else None
+        events = Events(events_url) if events_url else None
         return LiveVideoToVideo(
             raw=data,
             control_url=control_url,
-            events_url=data.get("events_url") if isinstance(data.get("events_url"), str) else None,
+            events_url=events_url,
             manifest_id=data.get("manifest_id") if isinstance(data.get("manifest_id"), str) else None,
             publish_url=publish_url,
             subscribe_url=data.get("subscribe_url") if isinstance(data.get("subscribe_url"), str) else None,
             control=control,
+            events=events,
         )
 
     def start_media(self, config: MediaPublishConfig) -> MediaPublish:
@@ -255,7 +260,6 @@ class LiveVideoToVideo:
         for result in results:
             if isinstance(result, BaseException):
                 raise result
-
 
 @dataclass(frozen=True)
 class GetPaymentResponse:
