@@ -51,8 +51,10 @@ async def main() -> None:
         print("subscribe_url:", job.subscribe_url)
         print()
 
+        sub = job.media_output()
+
         seen = 0
-        async for frame in job.media_frames():
+        async for frame in sub.frames():
             payload = {
                 "kind": frame.kind,
                 "pts": frame.pts,

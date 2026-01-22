@@ -10,28 +10,37 @@ from .media_decode import DecodedMediaFrame, MpegTsDecoder, decoder_error, is_de
 from .trickle_subscriber import SegmentReader, TrickleSubscriber
 
 
-class MediaSubscribe:
+class MediaOutput:
     """
-    Subscribe to a trickle media output
+    Access a trickle media output
 
     Exposes both:
       - per-segment iteration (SegmentReader objects)
       - continuous byte stream (bytes chunks)
     """
 
-    def __init__(self, subscribe_url: str) -> None:
-        self.subscribe_url = subscribe_url
-
-    def segments(
+    def __init__(
         self,
+        subscribe_url: str,
         *,
         start_seq: int = -2,
         max_retries: int = 5,
         max_segment_bytes: Optional[int] = None,
         connection_close: bool = False,
+        chunk_size: int = 64 * 1024,
+    ) -> None:
+        self.subscribe_url = subscribe_url
+        self.start_seq = start_seq
+        self.max_retries = max_retries
+        self.max_segment_bytes = max_segment_bytes
+        self.connection_close = connection_close
+        self.chunk_size = chunk_size
+
+    def segments(
+        self,
     ) -> AsyncIterator[SegmentReader]:
         """
-        Subscribe to the trickle media channel and yield SegmentReader objects.
+        Read the trickle media channel and yield SegmentReader objects.
 
         The caller is responsible for closing each segment.
         """
@@ -40,10 +49,10 @@ class MediaSubscribe:
         async def _iter() -> AsyncIterator[SegmentReader]:
             async with TrickleSubscriber(
                 url,
-                start_seq=start_seq,
-                max_retries=max_retries,
-                max_bytes=max_segment_bytes,
-                connection_close=connection_close,
+                start_seq=self.start_seq,
+                max_retries=self.max_retries,
+                max_bytes=self.max_segment_bytes,
+                connection_close=self.connection_close,
             ) as subscriber:
                 while True:
                     segment = await subscriber.next()
@@ -55,24 +64,13 @@ class MediaSubscribe:
 
     def bytes(
         self,
-        *,
-        start_seq: int = -2,
-        max_retries: int = 5,
-        max_segment_bytes: Optional[int] = None,
-        connection_close: bool = False,
-        chunk_size: int = 64 * 1024,
     ) -> AsyncIterator[bytes]:
         """
-        Subscribe to the trickle media channel and yield a continuous byte stream.
+        Read the trickle media channel and yield a continuous byte stream.
         """
 
         async def _iter() -> AsyncIterator[bytes]:
             async for chunk, _, _ in self._iter_bytes_with_meta(
-                start_seq=start_seq,
-                max_retries=max_retries,
-                max_segment_bytes=max_segment_bytes,
-                connection_close=connection_close,
-                chunk_size=chunk_size,
             ):
                 yield chunk
 
@@ -80,15 +78,9 @@ class MediaSubscribe:
 
     def frames(
         self,
-        *,
-        start_seq: int = -2,
-        max_retries: int = 5,
-        max_segment_bytes: Optional[int] = None,
-        connection_close: bool = False,
-        chunk_size: int = 64 * 1024,
     ) -> AsyncIterator[DecodedMediaFrame]:
         """
-        Subscribe to the trickle media channel, decode MPEG-TS, and yield raw frames.
+        Read the trickle media channel, decode MPEG-TS, and yield raw frames.
         """
 
         async def _iter() -> AsyncIterator[DecodedMediaFrame]:
@@ -98,11 +90,6 @@ class MediaSubscribe:
 
             async def _feed() -> None:
                 async for chunk, seq, is_first in self._iter_bytes_with_meta(
-                    start_seq=start_seq,
-                    max_retries=max_retries,
-                    max_segment_bytes=max_segment_bytes,
-                    connection_close=connection_close,
-                    chunk_size=chunk_size,
                 ):
                     if is_first:
                         decoder.mark_seq(seq)
@@ -138,19 +125,9 @@ class MediaSubscribe:
 
     async def _iter_bytes_with_meta(
         self,
-        *,
-        start_seq: int,
-        max_retries: int,
-        max_segment_bytes: Optional[int],
-        connection_close: bool,
-        chunk_size: int,
     ) -> AsyncIterator[Tuple[bytes, Optional[int], bool]]:
         checked_content_type = False
         async for segment in self.segments(
-            start_seq=start_seq,
-            max_retries=max_retries,
-            max_segment_bytes=max_segment_bytes,
-            connection_close=connection_close,
         ):
             if not checked_content_type:
                 _require_mpegts_content_type(segment.content_type())
@@ -159,7 +136,7 @@ class MediaSubscribe:
             first_chunk = True
             try:
                 while True:
-                    chunk = await segment.read(chunk_size=chunk_size)
+                    chunk = await segment.read(chunk_size=self.chunk_size)
                     if not chunk:
                         break
                     yield chunk, seq, first_chunk

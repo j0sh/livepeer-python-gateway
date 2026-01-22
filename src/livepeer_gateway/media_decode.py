@@ -45,6 +45,8 @@ _END = object()
 # can be annotated with the source segment.
 class _BlockingByteStream:
     def __init__(self) -> None:
+        # TODO: add backpressure (bounded queue + blocking feed) to avoid unbounded
+        # memory growth if the decoder thread can't keep up with the producer.
         self._queue: "queue.Queue[object]" = queue.Queue()
         self._buffer = bytearray()
         self._closed = False
@@ -167,6 +169,7 @@ def _build_decoded_frame(
 class MpegTsDecoder:
     def __init__(self) -> None:
         self._reader = _BlockingByteStream()
+        # TODO: add backpressure here too (bounded queue) if callers are slow to consume.
         self._output: "queue.Queue[object]" = queue.Queue()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="MpegTsDecoder", daemon=True)

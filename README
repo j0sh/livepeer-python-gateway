@@ -33,6 +33,11 @@ uv run examples/camera_capture.py --output - | ffplay -fflags nobuffer -flags lo
 uv run examples/camera_capture.py --output out.ts
 ```
 
+Subscribe to decoded media frames (video and/or audio) and print metadata
+```
+uv run examples/subscribe_frames.py --count 100
+```
+
 Subscribe to a LiveVideoToVideo trickle events channel
 ```
 uv run examples/subscribe_events.py

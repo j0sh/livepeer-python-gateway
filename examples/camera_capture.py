@@ -122,7 +122,8 @@ async def _write_media_output(job, output: str) -> None:
         close_out = True
 
     try:
-        async for chunk in job.media_bytes():
+        sub = job.media_output()
+        async for chunk in sub.bytes():
             await asyncio.to_thread(out.write, chunk)
     finally:
         if close_out:
@@ -153,8 +154,6 @@ async def main() -> None:
 
         media = job.start_media(MediaPublishConfig(fps=args.fps))
         if args.output:
-            if not job.subscribe_url:
-                raise LivepeerGatewayError("No subscribe_url present on this LiveVideoToVideo job")
             output_task = asyncio.create_task(_write_media_output(job, args.output))
 
         av.logging.set_level(av.logging.ERROR)
