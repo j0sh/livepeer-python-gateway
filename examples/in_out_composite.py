@@ -5,6 +5,7 @@ of input, loopback, output, and an empty tile with latency overlays.
 
 import argparse
 import asyncio
+from collections import deque
 import logging
 import queue
 import threading
@@ -90,6 +91,12 @@ def _parse_args() -> argparse.Namespace:
             "Capture pixel format for avfoundation. "
             "Supported formats vary by device; common options: uyvy422, yuyv422, nv12."
         ),
+    )
+    p.add_argument(
+        "--avg-window",
+        type=float,
+        default=3.5,
+        help="Moving average window in seconds for latency metrics (default: 3.5).",
     )
     return p.parse_args()
 
@@ -199,6 +206,17 @@ async def main() -> None:
         "out_pts_time": None,
     }
     latest_lock = threading.Lock()
+    avg_window_s = max(0.1, float(args.avg_window))
+    rtt_samples: "deque[tuple[float, float]]" = deque()
+    total_samples: "deque[tuple[float, float]]" = deque()
+    inference_samples: "deque[tuple[float, float]]" = deque()
+
+    def _push_avg(samples: "deque[tuple[float, float]]", now: float, value: float) -> float:
+        samples.append((now, value))
+        cutoff = now - avg_window_s
+        while samples and samples[0][0] < cutoff:
+            samples.popleft()
+        return sum(v for _, v in samples) / len(samples)
 
     def _update_cam(img, pts_time: Optional[float]) -> None:
         with latest_lock:
@@ -268,23 +286,27 @@ async def main() -> None:
                 tile_size = 480
 
             if tile_size > 0:
+                now = time.time()
                 if cam_pts_time is not None and loop_pts_time is not None:
                     rtt_s = cam_pts_time - loop_pts_time
-                    rtt_label = f"RTT: {rtt_s:+.3f}s"
+                    rtt_avg = _push_avg(rtt_samples, now, rtt_s)
+                    rtt_label = f"RTT: {rtt_s:+.3f}s (avg {rtt_avg:+.3f}s)"
                 else:
                     rtt_s = None
                     rtt_label = "RTT: n/a"
 
                 if cam_pts_time is not None and out_pts_time is not None:
                     total_delta_s = cam_pts_time - out_pts_time
-                    total_label = f"Total Delta: {total_delta_s:+.3f}s"
+                    total_avg = _push_avg(total_samples, now, total_delta_s)
+                    total_label = f"Total Delta: {total_delta_s:+.3f}s (avg {total_avg:+.3f}s)"
                 else:
                     total_delta_s = None
                     total_label = "Total Delta: n/a"
 
                 if total_delta_s is not None and rtt_s is not None:
                     inference_s = total_delta_s - rtt_s
-                    inference_label = f"Inference: {inference_s:+.3f}s"
+                    inference_avg = _push_avg(inference_samples, now, inference_s)
+                    inference_label = f"Inference: {inference_s:+.3f}s (avg {inference_avg:+.3f}s)"
                 else:
                     inference_label = "Inference: n/a"
 
