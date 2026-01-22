@@ -5,7 +5,14 @@ from contextlib import suppress
 from typing import AsyncIterator, Optional, Tuple
 
 from .errors import LivepeerGatewayError
-from .media_decode import DecodedMediaFrame, MpegTsDecoder, decoder_error, is_decoder_end
+from .media_decode import (
+    AudioDecodedMediaFrame,
+    DecodedMediaFrame,
+    MpegTsDecoder,
+    VideoDecodedMediaFrame,
+    decoder_error,
+    is_decoder_end,
+)
 
 from .trickle_subscriber import SegmentReader, TrickleSubscriber
 
@@ -78,12 +85,12 @@ class MediaOutput:
 
     def frames(
         self,
-    ) -> AsyncIterator[DecodedMediaFrame]:
+    ) -> AsyncIterator[AudioDecodedMediaFrame | VideoDecodedMediaFrame]:
         """
         Read the trickle media channel, decode MPEG-TS, and yield raw frames.
         """
 
-        async def _iter() -> AsyncIterator[DecodedMediaFrame]:
+        async def _iter() -> AsyncIterator[AudioDecodedMediaFrame | VideoDecodedMediaFrame]:
             decoder = MpegTsDecoder()
             output = decoder.output_queue()
             decoder.start()

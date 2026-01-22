@@ -21,13 +21,21 @@ class DecodedMediaFrame:
     demuxed_at: float
     decoded_at: float
     source_segment_seq: Optional[int]
-    width: Optional[int] = None
-    height: Optional[int] = None
-    pix_fmt: Optional[str] = None
-    sample_rate: Optional[int] = None
-    layout: Optional[str] = None
-    format: Optional[str] = None
-    samples: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class VideoDecodedMediaFrame(DecodedMediaFrame):
+    width: int
+    height: int
+    pix_fmt: Optional[str]
+
+
+@dataclass(frozen=True)
+class AudioDecodedMediaFrame(DecodedMediaFrame):
+    sample_rate: Optional[int]
+    layout: Optional[str]
+    format: Optional[str]
+    samples: Optional[int]
 
 
 class _SegmentMarker:
@@ -74,8 +82,15 @@ class _BlockingByteStream:
         # Blocking read interface consumed by PyAV demuxer.
         if size is None or size < 0:
             size = 64 * 1024
+        if size == 0:
+            return b""
 
-        while len(self._buffer) < size and not self._closed:
+        if self._buffer:
+            out = self._buffer[:size]
+            del self._buffer[:size]
+            return bytes(out)
+
+        while not self._buffer and not self._closed:
             item = self._queue.get()
             if item is _EOF:
                 self._closed = True
@@ -131,13 +146,13 @@ def _build_decoded_frame(
     demuxed_at: float,
     decoded_at: float,
     source_segment_seq: Optional[int],
-) -> DecodedMediaFrame:
+) -> AudioDecodedMediaFrame | VideoDecodedMediaFrame:
     pts = frame.pts
     time_base = _fraction_from_time_base(frame.time_base) if frame.time_base is not None else None
     pts_time = _time_from_pts(pts, time_base)
 
     if isinstance(frame, av.VideoFrame):
-        return DecodedMediaFrame(
+        return VideoDecodedMediaFrame(
             kind="video",
             frame=frame,
             pts=pts,
@@ -151,7 +166,7 @@ def _build_decoded_frame(
             pix_fmt=frame.format.name if frame.format else None,
         )
 
-    return DecodedMediaFrame(
+    return AudioDecodedMediaFrame(
         kind="audio",
         frame=frame,
         pts=pts,
