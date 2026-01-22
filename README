@@ -33,9 +33,10 @@ uv run examples/camera_capture.py --output - | ffplay -fflags nobuffer -flags lo
 uv run examples/camera_capture.py --output out.ts
 ```
 
-Subscribe to decoded media frames (video and/or audio) and print metadata
+Composite camera input and decoded output side-by-side with PTS delta
 ```
-uv run examples/subscribe_frames.py --count 100
+uv sync --group examples
+uv run examples/in_out_composite.py.py
 ```
 
 Subscribe to a LiveVideoToVideo trickle events channel
