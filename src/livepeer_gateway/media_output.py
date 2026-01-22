@@ -130,7 +130,7 @@ class MediaOutput:
         async for segment in self.segments(
         ):
             if not checked_content_type:
-                _require_mpegts_content_type(segment.content_type())
+                _require_mpegts_content_type(segment.headers().get("Content-Type"))
                 checked_content_type = True
             seq = segment.seq()
             first_chunk = True
