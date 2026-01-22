@@ -149,30 +149,36 @@ def _normalize_https_base_url(orch_url: str) -> str:
 
     parsed = urlparse(url)
     if parsed.scheme != "https":
-        raise ValueError(f"Only https:// orchestrator URLs are supported (got {parsed.scheme!r})")
+        raise ValueError(f"Only https:// URLs are supported (got {parsed.scheme!r})")
     if not parsed.netloc:
-        raise ValueError(f"Invalid https orchestrator URL: {orch_url!r}")
+        raise ValueError(f"Invalid https URL: {orch_url!r}")
     if parsed.path not in ("", "/") or parsed.params or parsed.query or parsed.fragment:
-        raise ValueError(f"Orchestrator URL must not include a path/query/fragment: {orch_url!r}")
-    return f"https://{parsed.netloc}"
+        raise ValueError(f"URL must not include a path/query/fragment: {orch_url!r}")
+    return f"{parsed.scheme}://{parsed.netloc}"
 
 
-def _normalize_https_origin(url: str) -> str:
+def _normalize_https_signer_origin(url: str) -> str:
     """
     Normalize a URL (possibly with a path) into an https:// origin (scheme + host:port).
 
     Accepts:
     - "host:port" (implicitly https://host:port)
     - "https://host:port[/...]" (path/query/fragment are ignored)
+    - "http://host:port[/...]" (only if LIVEPEER_ALLOW_HTTP_SIGNER env var is set)
     """
     url = url.strip()
-    u = url if "://" in url else f"https://{url}"
+    
+    # Check if the env var is set to allow http signer urls
+    allow_http = os.getenv("LIVEPEER_ALLOW_HTTP_SIGNER", "").strip().lower() in ("1", "true")
+    default_scheme = "http" if (allow_http and "://" not in url) else "https"
+    u = url if "://" in url else f"{default_scheme}://{url}"
     parsed = urlparse(u)
-    if parsed.scheme != "https":
+    allowed_schemes = ("https", "http") if allow_http else ("https",)
+    if parsed.scheme not in allowed_schemes:
         raise ValueError(f"Only https:// URLs are supported (got {parsed.scheme!r})")
     if not parsed.netloc:
         raise ValueError(f"Invalid https URL: {url!r}")
-    return f"https://{parsed.netloc}"
+    return f"{parsed.scheme}://{parsed.netloc}"
 
 
 @dataclass(frozen=True)
@@ -329,7 +335,7 @@ def GetPayment(
             "The orchestrator returned missing or zero price_info."
         )
 
-    base = _normalize_https_base_url(signer_base_url)
+    base = _normalize_https_signer_origin(signer_base_url)
     url = f"{base}/generate-live-payment"
 
     # base64 protobuf bytes of net.PaymentResult containing OrchestratorInfo
@@ -568,7 +574,7 @@ def _get_signer_material(signer_base_url: str) -> SignerMaterial:
 
     # Accept either a base URL or a full URL that includes /sign-orchestrator-info.
     # Normalize to an https:// origin and append the expected path.
-    signer_url = f"{_normalize_https_origin(signer_base_url)}/sign-orchestrator-info"
+    signer_url = f"{_normalize_https_signer_origin(signer_base_url)}/sign-orchestrator-info"
 
     try:
         # Some signers accept/expect POST with an empty JSON object.
