@@ -1,6 +1,6 @@
 """
-Capture MacOS camera frames, publish to Livepeer, and show a side-by-side
-composite of camera input and decoded media output with a PTS delta overlay.
+Capture MacOS camera frames, publish to Livepeer, and show a 2x2 composite
+of input, loopback, output, and an empty tile with latency overlays.
 """
 
 import argparse
@@ -16,6 +16,7 @@ from typing import Optional
 import av
 
 from livepeer_gateway.media_publish import MediaPublishConfig
+from livepeer_gateway.media_output import MediaOutput
 from livepeer_gateway.orchestrator import (
     GetOrchestratorInfo,
     LivepeerGatewayError,
@@ -50,7 +51,7 @@ def _configure_logging() -> None:
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Capture camera frames and show camera/output composite with PTS delta."
+        description="Capture camera frames and show a 2x2 composite with latency overlays."
     )
     p.add_argument(
         "orchestrator",
@@ -128,6 +129,44 @@ def _resize_to_height(img, height: int):
     return cv2.resize(img, (width, height))
 
 
+def _letterbox_to_square(img, size: int):
+    import cv2
+    import numpy as np
+
+    tile = np.zeros((size, size, 3), dtype=np.uint8)
+    if img is None:
+        return tile
+    h, w = img.shape[:2]
+    if h <= 0 or w <= 0:
+        return tile
+    scale = min(size / w, size / h)
+    new_w = max(1, int(round(w * scale)))
+    new_h = max(1, int(round(h * scale)))
+    resized = cv2.resize(img, (new_w, new_h))
+    x = (size - new_w) // 2
+    y = (size - new_h) // 2
+    tile[y : y + new_h, x : x + new_w] = resized
+    return tile
+
+
+def _draw_labels(img, lines):
+    import cv2
+
+    y = 28
+    for line in lines:
+        cv2.putText(
+            img,
+            line,
+            (12, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 0),
+            2,
+            cv2.LINE_AA,
+        )
+        y += 28
+
+
 async def main() -> None:
     _configure_logging()
     args = _parse_args()
@@ -148,11 +187,14 @@ async def main() -> None:
     stop_event = threading.Event()
     stop_async = asyncio.Event()
     output_task: Optional[asyncio.Task[None]] = None
+    loopback_task: Optional[asyncio.Task[None]] = None
     display_task: Optional[asyncio.Task[None]] = None
 
     latest = {
         "cam_img": None,
         "cam_pts_time": None,
+        "loop_img": None,
+        "loop_pts_time": None,
         "out_img": None,
         "out_pts_time": None,
     }
@@ -168,11 +210,16 @@ async def main() -> None:
             latest["out_img"] = img
             latest["out_pts_time"] = pts_time
 
+    def _update_loop(img, pts_time: Optional[float]) -> None:
+        with latest_lock:
+            latest["loop_img"] = img
+            latest["loop_pts_time"] = pts_time
+
     async def _subscribe_output() -> None:
         if job is None:
             return
-        out = job.media_output()
-        async for decoded in out.frames():
+        output = job.media_output()
+        async for decoded in output.frames():
             if stop_async.is_set():
                 break
             if decoded.kind != "video":
@@ -183,57 +230,90 @@ async def main() -> None:
                 continue
             _update_out(img, decoded.pts_time)
 
+    async def _subscribe_loopback() -> None:
+        if job is None or not job.publish_url:
+            return
+        loopback = MediaOutput(job.publish_url)
+        async for decoded in loopback.frames():
+            if stop_async.is_set():
+                break
+            if decoded.kind != "video":
+                continue
+            try:
+                img = _bgr_from_frame(decoded.frame)
+            except Exception:
+                continue
+            _update_loop(img, decoded.pts_time)
+
     async def _display_loop() -> None:
-        title = "camera | output (press q to quit)"
+        title = "input | loopback | output | empty (press q to quit)"
         while not stop_async.is_set():
             with latest_lock:
                 cam_img = latest["cam_img"]
                 out_img = latest["out_img"]
                 cam_pts_time = latest["cam_pts_time"]
                 out_pts_time = latest["out_pts_time"]
+                loop_img = latest["loop_img"]
+                loop_pts_time = latest["loop_pts_time"]
 
-            if cam_img is not None and out_img is not None:
-                target_height = min(cam_img.shape[0], out_img.shape[0])
-                cam_disp = _resize_to_height(cam_img, target_height)
-                out_disp = _resize_to_height(out_img, target_height)
-                if cam_disp is not None and out_disp is not None:
-                    composite = np.hstack([cam_disp, out_disp])
-                    if cam_pts_time is not None and out_pts_time is not None:
-                        delta_s = cam_pts_time - out_pts_time
-                        label = f"PTS delta: {delta_s:+.3f}s"
-                    else:
-                        label = "PTS delta: n/a"
-                    cv2.putText(
-                        composite,
-                        "INPUT",
-                        (12, 28),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.8,
-                        (0, 255, 0),
-                        2,
-                        cv2.LINE_AA,
-                    )
-                    cv2.putText(
-                        composite,
-                        "OUTPUT",
-                        (cam_disp.shape[1] + 12, 28),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.8,
-                        (0, 255, 0),
-                        2,
-                        cv2.LINE_AA,
-                    )
-                    cv2.putText(
-                        composite,
-                        label,
-                        (cam_disp.shape[1] + 12, 58),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.8,
-                        (0, 255, 0),
-                        2,
-                        cv2.LINE_AA,
-                    )
-                    cv2.imshow(title, composite)
+            if cam_img is not None:
+                base_img = cam_img
+            elif loop_img is not None:
+                base_img = loop_img
+            else:
+                base_img = out_img
+            if base_img is not None:
+                tile_size = min(base_img.shape[0], base_img.shape[1])
+            else:
+                tile_size = 480
+
+            if tile_size > 0:
+                if cam_pts_time is not None and loop_pts_time is not None:
+                    rtt_s = cam_pts_time - loop_pts_time
+                    rtt_label = f"RTT: {rtt_s:+.3f}s"
+                else:
+                    rtt_s = None
+                    rtt_label = "RTT: n/a"
+
+                if cam_pts_time is not None and out_pts_time is not None:
+                    total_delta_s = cam_pts_time - out_pts_time
+                    total_label = f"Total Delta: {total_delta_s:+.3f}s"
+                else:
+                    total_delta_s = None
+                    total_label = "Total Delta: n/a"
+
+                if total_delta_s is not None and rtt_s is not None:
+                    inference_s = total_delta_s - rtt_s
+                    inference_label = f"Inference: {inference_s:+.3f}s"
+                else:
+                    inference_label = "Inference: n/a"
+
+                input_tile = _letterbox_to_square(cam_img, tile_size)
+                loop_tile = _letterbox_to_square(loop_img, tile_size)
+                out_tile = _letterbox_to_square(out_img, tile_size)
+                empty_tile = _letterbox_to_square(None, tile_size)
+
+                if cam_img is None:
+                    _draw_labels(input_tile, ["CAMERA PENDING"])
+                else:
+                    _draw_labels(input_tile, ["INPUT"])
+
+                if loop_img is None:
+                    _draw_labels(loop_tile, ["LOOPBACK PENDING"])
+                else:
+                    _draw_labels(loop_tile, ["LOOPBACK", rtt_label])
+
+                if out_img is None:
+                    _draw_labels(out_tile, ["OUTPUT PENDING"])
+                else:
+                    _draw_labels(out_tile, ["OUTPUT", inference_label, total_label])
+
+                _draw_labels(empty_tile, ["EMPTY"])
+
+                top = np.hstack([input_tile, loop_tile])
+                bottom = np.hstack([out_tile, empty_tile])
+                composite = np.vstack([top, bottom])
+                cv2.imshow(title, composite)
 
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
@@ -280,6 +360,7 @@ async def main() -> None:
         capture_thread.start()
 
         output_task = asyncio.create_task(_subscribe_output())
+        loopback_task = asyncio.create_task(_subscribe_loopback())
         display_task = asyncio.create_task(_display_loop())
 
         time_base = Fraction(1, _TIME_BASE)
@@ -319,6 +400,10 @@ async def main() -> None:
             output_task.cancel()
             with suppress(asyncio.CancelledError):
                 await output_task
+        if loopback_task is not None:
+            loopback_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await loopback_task
         if display_task is not None:
             display_task.cancel()
             with suppress(asyncio.CancelledError):
