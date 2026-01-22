@@ -136,49 +136,61 @@ def post_json(
     return data
 
 
-def _normalize_https_base_url(orch_url: str) -> str:
+def _normalize_https_base_url(
+    orch_url: str,
+    *,
+    allow_http: bool = False,
+    keep_path: bool = False,
+) -> str:
     """
-    Normalize an orchestrator base URL to an https:// URL with no path/query/fragment.
+    Normalize a URL to scheme://host[:port][/<path>] with an https default.
 
     Accepts:
     - "host:port" (implicitly treated as https://host:port)
-    - "https://host:port"
+    - "https://host:port[/path]"
+    - "http://host:port[/path]" (only if allow_http=True)
     """
     orch_url = orch_url.strip().rstrip("/")
-    url = orch_url if "://" in orch_url else f"https://{orch_url}"
+    default_scheme = "http" if (allow_http and "://" not in orch_url) else "https"
+    url = orch_url if "://" in orch_url else f"{default_scheme}://{orch_url}"
 
     parsed = urlparse(url)
-    if parsed.scheme != "https":
-        raise ValueError(f"Only https:// URLs are supported (got {parsed.scheme!r})")
-    if not parsed.netloc:
-        raise ValueError(f"Invalid https URL: {orch_url!r}")
-    if parsed.path not in ("", "/") or parsed.params or parsed.query or parsed.fragment:
-        raise ValueError(f"URL must not include a path/query/fragment: {orch_url!r}")
-    return f"{parsed.scheme}://{parsed.netloc}"
-
-
-def _normalize_https_signer_origin(url: str) -> str:
-    """
-    Normalize a URL (possibly with a path) into an https:// origin (scheme + host:port).
-
-    Accepts:
-    - "host:port" (implicitly https://host:port)
-    - "https://host:port[/...]" (path/query/fragment are ignored)
-    - "http://host:port[/...]" (only if ALLOW_HTTP_SIGNER env var is set)
-    """
-    url = url.strip()
-    
-    # Check if the env var is set to allow http signer urls
-    allow_http = os.getenv("ALLOW_HTTP_SIGNER", "").strip().lower() in ("1", "true")
-    default_scheme = "http" if (allow_http and "://" not in url) else "https"
-    u = url if "://" in url else f"{default_scheme}://{url}"
-    parsed = urlparse(u)
     allowed_schemes = ("https", "http") if allow_http else ("https",)
     if parsed.scheme not in allowed_schemes:
         raise ValueError(f"Only https:// URLs are supported (got {parsed.scheme!r})")
     if not parsed.netloc:
-        raise ValueError(f"Invalid https URL: {url!r}")
-    return f"{parsed.scheme}://{parsed.netloc}"
+        raise ValueError(f"Invalid https URL: {orch_url!r}")
+
+    if not keep_path:
+        if parsed.path not in ("", "/") or parsed.params or parsed.query or parsed.fragment:
+            raise ValueError(f"URL must not include a path/query/fragment: {orch_url!r}")
+        return f"{parsed.scheme}://{parsed.netloc}"
+
+    # keep_path=True: allow a path prefix, but drop params/query/fragment
+    path = parsed.path or ""
+    if not path or path == "/":
+        path = ""
+    else:
+        path = "/" + path.lstrip("/").rstrip("/")
+
+    return f"{parsed.scheme}://{parsed.netloc}{path}"
+
+
+def _normalize_https_signer_origin(url: str) -> str:
+    """
+    Normalize a signer URL (optionally with a path prefix) into scheme://host[:port][/<path>].
+
+    Accepts:
+    - "host:port" (implicitly https://host:port)
+    - "https://host:port[/...]" (path preserved, query/fragment dropped)
+    - "http://host:port[/...]" (only if ALLOW_HTTP_SIGNER env var is set)
+    """
+    url = url.strip()
+
+    # Check if the env var is set to allow http signer urls
+    allow_http = os.getenv("ALLOW_HTTP_SIGNER", "").strip().lower() in ("1", "true")
+
+    return _normalize_https_base_url(url, allow_http=allow_http, keep_path=True)
 
 
 @dataclass(frozen=True)
