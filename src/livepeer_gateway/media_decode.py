@@ -16,7 +16,8 @@ class DecodedMediaFrame:
     frame: Union[av.VideoFrame, av.AudioFrame]
     pts: Optional[int]
     time_base: Optional[Fraction]
-    time_s: Optional[float]
+    # pts_time: presentation timestamp in seconds (pts * time_base). Not wall-clock time.
+    pts_time: Optional[float]
     demuxed_at: float
     decoded_at: float
     source_segment_seq: Optional[int]
@@ -115,7 +116,7 @@ def _fraction_from_time_base(time_base: object) -> Optional[Fraction]:
         return None
 
 
-def _time_s_from_pts(pts: Optional[int], time_base: Optional[Fraction]) -> Optional[float]:
+def _time_from_pts(pts: Optional[int], time_base: Optional[Fraction]) -> Optional[float]:
     if pts is None or time_base is None:
         return None
     try:
@@ -133,7 +134,7 @@ def _build_decoded_frame(
 ) -> DecodedMediaFrame:
     pts = frame.pts
     time_base = _fraction_from_time_base(frame.time_base) if frame.time_base is not None else None
-    time_s = _time_s_from_pts(pts, time_base)
+    pts_time = _time_from_pts(pts, time_base)
 
     if isinstance(frame, av.VideoFrame):
         return DecodedMediaFrame(
@@ -141,7 +142,7 @@ def _build_decoded_frame(
             frame=frame,
             pts=pts,
             time_base=time_base,
-            time_s=time_s,
+            pts_time=pts_time,
             demuxed_at=demuxed_at,
             decoded_at=decoded_at,
             source_segment_seq=source_segment_seq,
@@ -155,7 +156,7 @@ def _build_decoded_frame(
         frame=frame,
         pts=pts,
         time_base=time_base,
-        time_s=time_s,
+        pts_time=pts_time,
         demuxed_at=demuxed_at,
         decoded_at=decoded_at,
         source_segment_seq=source_segment_seq,
