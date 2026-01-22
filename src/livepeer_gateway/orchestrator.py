@@ -164,12 +164,12 @@ def _normalize_https_signer_origin(url: str) -> str:
     Accepts:
     - "host:port" (implicitly https://host:port)
     - "https://host:port[/...]" (path/query/fragment are ignored)
-    - "http://host:port[/...]" (only if LIVEPEER_ALLOW_HTTP_SIGNER env var is set)
+    - "http://host:port[/...]" (only if ALLOW_HTTP_SIGNER env var is set)
     """
     url = url.strip()
     
     # Check if the env var is set to allow http signer urls
-    allow_http = os.getenv("LIVEPEER_ALLOW_HTTP_SIGNER", "").strip().lower() in ("1", "true")
+    allow_http = os.getenv("ALLOW_HTTP_SIGNER", "").strip().lower() in ("1", "true")
     default_scheme = "http" if (allow_http and "://" not in url) else "https"
     u = url if "://" in url else f"{default_scheme}://{url}"
     parsed = urlparse(u)
