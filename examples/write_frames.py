@@ -54,7 +54,12 @@ async def main() -> None:
 
     job = None
     try:
-        info = GetOrchestratorInfo(args.orchestrator, signer_url=args.signer)
+        info = GetOrchestratorInfo(
+            args.orchestrator,
+            signer_url=args.signer,
+            typ="lv2v",
+            model_id=args.model_id,
+        )
         job = StartJob(
             info,
             StartJobRequest(model_id=args.model_id),
