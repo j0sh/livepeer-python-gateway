@@ -24,7 +24,6 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Remote signer base URL (no path). If omitted, runs in offchain mode.",
     )
-
     return p.parse_args()
 
 def main() -> None:
@@ -32,16 +31,12 @@ def main() -> None:
 
     for orch_url in args.orchestrators:
         try:
-            info = GetOrchestratorInfo(
-                orch_url,
-                signer_url=args.signer,
-            )
+            info = GetOrchestratorInfo(orch_url,signer_url=args.signer)
 
             print("=== OrchestratorInfo ===")
             print("Orchestrator:", orch_url)
             print("Transcoder URI:", info.transcoder)
             print("ETH Address:", info.address.hex())
-            
             if info.HasField("capabilities") and info.capabilities.version:
                 print("Version:", info.capabilities.version)
             else:
