@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import ipaddress
 import json
 import os
-import ipaddress
 import re
 import socket
 import ssl
@@ -28,6 +28,8 @@ from .media_output import MediaOutput
 from .errors import LivepeerGatewayError
 
 _HEX_RE = re.compile(r"^(0x)?[0-9a-fA-F]*$")
+
+CAPABILITY_LIVE_VIDEO_TO_VIDEO = 35
 
 def _truncate(s: str, max_len: int = 2000) -> str:
     if len(s) <= max_len:
@@ -136,43 +138,121 @@ def post_json(
     return data
 
 
-def _normalize_https_base_url(orch_url: str) -> str:
+def _normalize_https_base_url(
+    orch_url: str,
+    *,
+    allow_http: bool = False,
+    keep_path: bool = False,
+) -> str:
     """
-    Normalize an orchestrator base URL to an https:// URL with no path/query/fragment.
+    Normalize a URL to scheme://host[:port][/<path>] with an https default.
 
     Accepts:
     - "host:port" (implicitly treated as https://host:port)
-    - "https://host:port"
+    - "https://host:port[/path]"
+    - "http://host:port[/path]" (only if allow_http=True)
     """
     orch_url = orch_url.strip().rstrip("/")
-    url = orch_url if "://" in orch_url else f"https://{orch_url}"
+    default_scheme = "http" if (allow_http and "://" not in orch_url) else "https"
+    url = orch_url if "://" in orch_url else f"{default_scheme}://{orch_url}"
 
     parsed = urlparse(url)
-    if parsed.scheme != "https":
-        raise ValueError(f"Only https:// orchestrator URLs are supported (got {parsed.scheme!r})")
+    allowed_schemes = ("https", "http") if allow_http else ("https",)
+    if parsed.scheme not in allowed_schemes:
+        raise ValueError(f"Only https:// URLs are supported (got {parsed.scheme!r})")
     if not parsed.netloc:
-        raise ValueError(f"Invalid https orchestrator URL: {orch_url!r}")
-    if parsed.path not in ("", "/") or parsed.params or parsed.query or parsed.fragment:
-        raise ValueError(f"Orchestrator URL must not include a path/query/fragment: {orch_url!r}")
-    return f"https://{parsed.netloc}"
+        raise ValueError(f"Invalid https URL: {orch_url!r}")
+
+    if not keep_path:
+        if parsed.path not in ("", "/") or parsed.params or parsed.query or parsed.fragment:
+            raise ValueError(f"URL must not include a path/query/fragment: {orch_url!r}")
+        return f"{parsed.scheme}://{parsed.netloc}"
+
+    # keep_path=True: allow a path prefix, but drop params/query/fragment
+    path = parsed.path or ""
+    if not path or path == "/":
+        path = ""
+    else:
+        path = "/" + path.lstrip("/").rstrip("/")
+
+    return f"{parsed.scheme}://{parsed.netloc}{path}"
 
 
-def _normalize_https_origin(url: str) -> str:
+def _normalize_https_signer_origin(url: str) -> str:
     """
-    Normalize a URL (possibly with a path) into an https:// origin (scheme + host:port).
+    Normalize a signer URL (optionally with a path prefix) into scheme://host[:port][/<path>].
 
     Accepts:
     - "host:port" (implicitly https://host:port)
-    - "https://host:port[/...]" (path/query/fragment are ignored)
+    - "https://host:port[/...]" (path preserved, query/fragment dropped)
+    - "http://host:port[/...]" (only if ALLOW_HTTP_SIGNER env var is set)
     """
     url = url.strip()
-    u = url if "://" in url else f"https://{url}"
-    parsed = urlparse(u)
-    if parsed.scheme != "https":
-        raise ValueError(f"Only https:// URLs are supported (got {parsed.scheme!r})")
-    if not parsed.netloc:
-        raise ValueError(f"Invalid https URL: {url!r}")
-    return f"https://{parsed.netloc}"
+
+    # Check if the env var is set to allow http signer urls
+    allow_http = os.getenv("ALLOW_HTTP_SIGNER", "").strip().lower() in ("1", "true")
+
+    return _normalize_https_base_url(url, allow_http=allow_http, keep_path=True)
+
+
+def build_capabilities(capability: int, constraint: Optional[str]) -> lp_rpc_pb2.Capabilities:
+    """
+    Build a capabilities message with an optional constraint for a specific capability.
+    """
+    caps = lp_rpc_pb2.Capabilities()
+    if capability:
+        caps.capacities[capability] = 1
+        if constraint:
+            if not caps.HasField("constraints"):
+                caps.constraints.CopyFrom(lp_rpc_pb2.Capabilities.Constraints())
+            constraints = caps.constraints
+            per_cap = getattr(constraints, "PerCapability", None) or getattr(constraints, "per_capability", None)
+            if per_cap is None:
+                per_cap = constraints.PerCapability
+            per_cap[capability].models[constraint].warm = False
+    return caps
+
+
+def _select_price_info(
+    info: lp_rpc_pb2.OrchestratorInfo, *, typ: str, model_id: Optional[str]
+) -> lp_rpc_pb2.PriceInfo:
+    """
+    Choose the price info to use for a payment request.
+
+    For LV2V, prefer a capability-scoped price that matches the requested model ID.
+    Fallback to the general price_info only if no matching capability price exists.
+    """
+    if typ == "lv2v":
+        if not model_id:
+            raise LivepeerGatewayError("GetPayment requires model_id for LV2V pricing.")
+
+        # Capability 35 corresponds to Live video to video.
+        for pi in info.capabilities_prices:
+            if (
+                pi.capability == CAPABILITY_LIVE_VIDEO_TO_VIDEO
+                and pi.pricePerUnit > 0
+                and pi.pixelsPerUnit > 0
+                and pi.constraint == model_id
+            ):
+                return pi
+
+        # No matching capability price; fall back to general price if valid.
+        if info.HasField("price_info") and info.price_info.pricePerUnit > 0 and info.price_info.pixelsPerUnit > 0:
+            return info.price_info
+
+        raise LivepeerGatewayError(
+            f"No capability price found for LV2V model_id={model_id}; orchestrator did not return usable pricing."
+        )
+
+    # Non-LV2V: use general price_info first, otherwise any valid capability price.
+    if info.HasField("price_info") and info.price_info.pricePerUnit > 0 and info.price_info.pixelsPerUnit > 0:
+        return info.price_info
+
+    for pi in info.capabilities_prices:
+        if pi.pricePerUnit > 0 and pi.pixelsPerUnit > 0:
+            return pi
+
+    raise LivepeerGatewayError("Orchestrator did not return usable pricing information.")
 
 
 @dataclass(frozen=True)
@@ -300,14 +380,20 @@ def GetPayment(
     info: lp_rpc_pb2.OrchestratorInfo,
     *,
     typ: str = "lv2v",
+    model_id: Optional[str] = None,
 ) -> GetPaymentResponse:
     """
     Call the remote signer to generate an automatic payment for a job.
 
     POST {signer_base_url}/generate-live-payment with:
       orchestrator: base64 protobuf bytes of net.PaymentResult containing OrchestratorInfo
-      type: job type (default: lv2v)
+      priceInfo: pricing selected by the gateway (capability + constraint/model)
     """
+
+    if typ == "lv2v" and not model_id:
+        raise LivepeerGatewayError(
+            "GetPayment requires model_id when requesting LV2V payments."
+        )
 
     if not signer_base_url:
         # Offchain mode: still send the expected headers, but with empty content.
@@ -320,23 +406,38 @@ def GetPayment(
         seg = base64.b64encode(seg.SerializeToString()).decode("ascii")
         return GetPaymentResponse(seg_creds=seg, payment="")
 
-    # Price info must be valid
-    has_price_info = info.HasField("price_info")
-    price_is_zero = has_price_info and info.price_info.pricePerUnit == 0
-    if not has_price_info or price_is_zero:
-        raise LivepeerGatewayError(
-            "Valid price info required when using remote signer. "
-            "The orchestrator returned missing or zero price_info."
-        )
+    # Verify there's some pricing available (either price_info or capabilities_prices).
+    price_info = _select_price_info(info, typ=typ, model_id=model_id)
 
-    base = _normalize_https_base_url(signer_base_url)
+    # Populate price_info on the OrchestratorInfo protobuf that will be sent to the signer.
+    info_for_payment = lp_rpc_pb2.OrchestratorInfo()
+    info_for_payment.CopyFrom(info)
+    info_for_payment.price_info.CopyFrom(price_info)
+
+    base = _normalize_https_signer_origin(signer_base_url)
     url = f"{base}/generate-live-payment"
 
     # base64 protobuf bytes of net.PaymentResult containing OrchestratorInfo
-    pb = lp_rpc_pb2.PaymentResult(info=info).SerializeToString()
+    # The full info is sent including capabilities_prices so the signer can look up pricing
+    pb = lp_rpc_pb2.PaymentResult(info=info_for_payment).SerializeToString()
     orch_b64 = base64.b64encode(pb).decode("ascii")
 
-    data = post_json(url, {"orchestrator": orch_b64, "type": typ})
+    capability = price_info.capability
+    if typ == "lv2v" and capability == 0:
+        capability = CAPABILITY_LIVE_VIDEO_TO_VIDEO
+    constraint = price_info.constraint or (model_id or "")
+
+    payload = {
+        "orchestrator": orch_b64,
+        "priceInfo": {
+            "pricePerUnit": price_info.pricePerUnit,
+            "pixelsPerUnit": price_info.pixelsPerUnit,
+            "capability": capability,
+            "constraint": constraint,
+        },
+        "type": typ,
+    }
+    data = post_json(url, payload)
 
     payment = data.get("payment")
     if not isinstance(payment, str) or not payment:
@@ -347,6 +448,17 @@ def GetPayment(
         raise LivepeerGatewayError(f"GetPayment error: invalid 'segCreds' in response (url={url})")
 
     return GetPaymentResponse(payment=payment, seg_creds=seg_creds)
+
+
+def _start_job_with_headers(
+    info: lp_rpc_pb2.OrchestratorInfo,
+    req: StartJobRequest,
+    headers: dict[str, Optional[str]],
+) -> LiveVideoToVideo:
+    base = _normalize_https_base_url(info.transcoder)
+    url = f"{base}/live-video-to-video"
+    data = post_json(url, req.to_json(), headers=headers)
+    return LiveVideoToVideo.from_json(data)
 
 
 def StartJob(
@@ -364,16 +476,13 @@ def StartJob(
     if not req.model_id:
         raise LivepeerGatewayError("StartJob requires model_id")
 
-    p = GetPayment(signer_base_url, info)
-    headers: dict[str, str] = {
+    p = GetPayment(signer_base_url, info, model_id=req.model_id)
+    headers: dict[str, Optional[str]] = {
         "Livepeer-Payment": p.payment,
         "Livepeer-Segment": p.seg_creds,
     }
 
-    base = _normalize_https_base_url(info.transcoder)
-    url = f"{base}/live-video-to-video"
-    data = post_json(url, req.to_json(), headers=headers)
-    return LiveVideoToVideo.from_json(data)
+    return _start_job_with_headers(info, req, headers)
 
 
 
@@ -568,7 +677,7 @@ def _get_signer_material(signer_base_url: str) -> SignerMaterial:
 
     # Accept either a base URL or a full URL that includes /sign-orchestrator-info.
     # Normalize to an https:// origin and append the expected path.
-    signer_url = f"{_normalize_https_origin(signer_base_url)}/sign-orchestrator-info"
+    signer_url = f"{_normalize_https_signer_origin(signer_base_url)}/sign-orchestrator-info"
 
     try:
         # Some signers accept/expect POST with an empty JSON object.
@@ -655,7 +764,7 @@ class OrchestratorClient:
         self._channel = grpc.secure_channel(target, credentials, options=options)
         self._stub = lp_rpc_pb2_grpc.OrchestratorStub(self._channel)
 
-    def GetOrchestratorInfo(self) -> lp_rpc_pb2.OrchestratorInfo:
+    def GetOrchestratorInfo(self, *, caps: Optional[lp_rpc_pb2.Capabilities] = None) -> lp_rpc_pb2.OrchestratorInfo:
         """
         Wrapper for the Orchestrator RPC method GetOrchestrator(...)
         but exposed as GetOrchestratorInfo() for convenience.
@@ -673,8 +782,8 @@ class OrchestratorClient:
         request = lp_rpc_pb2.OrchestratorRequest(
             address=signer.address,
             sig=signer.sig,
+            capabilities=caps,
             ignoreCapacityCheck=True,
-            # capabilities=...  # can be added later
         )
 
         try:
@@ -697,14 +806,30 @@ class OrchestratorClient:
             raise OrchestratorRpcError(self.orch_url, f"{code}: {msg}", cause=e) from None
 
 
-def GetOrchestratorInfo(orch_url: str, *, signer_url: Optional[str] = None) -> lp_rpc_pb2.OrchestratorInfo:
+
+
+def GetOrchestratorInfo(
+    orch_url: str,
+    *,
+    signer_url: Optional[str] = None,
+    caps: Optional[lp_rpc_pb2.Capabilities] = None,
+    typ: str = "lv2v",
+    model_id: Optional[str] = None,
+) -> lp_rpc_pb2.OrchestratorInfo:
     """
     Public functional API:
-        GetOrchestratorInfo(orch_url, signer_url=...)
+        GetOrchestratorInfo(orch_url, signer_url=..., typ="lv2v", model_id=...)
     Remote signer is called once per process (cached).
     Always uses secure channel (TLS) with certificate verification disabled.
+
+    For live-video-to-video (typ="lv2v"), if a model_id is provided we
+    request orchestrator info with capability 35 and constraint=model_id so
+    ticket params align with the requested model.
     """
-    return OrchestratorClient(orch_url, signer_url=signer_url).GetOrchestratorInfo()
+    effective_caps = caps
+    if typ == "lv2v" and model_id:
+        effective_caps = build_capabilities(CAPABILITY_LIVE_VIDEO_TO_VIDEO, model_id)
+    return OrchestratorClient(orch_url, signer_url=signer_url).GetOrchestratorInfo(caps=effective_caps)
 
 
 @dataclass
