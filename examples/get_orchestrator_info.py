@@ -122,6 +122,36 @@ def main() -> None:
 
             print()
 
+            # Display pricing information
+            has_general_price = info.HasField("price_info") and info.price_info.pricePerUnit > 0
+            has_cap_prices = bool(info.capabilities_prices)
+
+            if has_general_price or has_cap_prices:
+                print("Pricing:")
+
+                if has_general_price:
+                    price_per_unit = info.price_info.pricePerUnit
+                    pixels_per_unit = info.price_info.pixelsPerUnit if info.price_info.pixelsPerUnit > 0 else 1
+                    print(f"  General: {price_per_unit} wei per {pixels_per_unit} pixel(s)")
+
+                if has_cap_prices:
+                    if has_general_price:
+                        print("  Capability-specific prices:")
+                    for cap_price in info.capabilities_prices:
+                        if cap_price.pricePerUnit > 0:
+                            cap_id = cap_price.capability if cap_price.capability else "?"
+                            cap_name = format_capability(cap_id) if cap_id != "?" else "unknown"
+                            price_per_unit = cap_price.pricePerUnit
+                            pixels_per_unit = cap_price.pixelsPerUnit if cap_price.pixelsPerUnit > 0 else 1
+                            constraint = f" [{cap_price.constraint}]" if cap_price.constraint else ""
+                            indent = "    " if has_general_price else "  "
+                            print(f"{indent}{cap_name} {constraint}: {price_per_unit} wei per {pixels_per_unit} pixel(s)")
+
+                print()
+            else:
+                print("Pricing: not provided")
+                print()
+
             if info.hardware:
                 print("Hardware / GPU:")
                 for hw in info.hardware:
