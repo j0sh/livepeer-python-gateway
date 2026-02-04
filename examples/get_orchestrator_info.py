@@ -68,7 +68,14 @@ def main() -> None:
         )
 
         for orch_url in orch_list:
-            info = GetOrchestratorInfo(orch_url, signer_url=args.signer)
+            try:
+                info = GetOrchestratorInfo(orch_url, signer_url=args.signer)
+            except LivepeerGatewayError as e:
+                print("=== OrchestratorInfo ===")
+                print("Orchestrator:", orch_url)
+                print(f"ERROR: {e}")
+                print()
+                continue
 
             print("=== OrchestratorInfo ===")
             print("Orchestrator:", orch_url)
