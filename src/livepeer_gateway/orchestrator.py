@@ -5,6 +5,7 @@ import base64
 import json
 import os
 import ipaddress
+import logging
 import re
 import socket
 import ssl
@@ -29,6 +30,7 @@ from .media_output import MediaOutput
 from .errors import LivepeerGatewayError, NoOrchestratorAvailableError
 
 _HEX_RE = re.compile(r"^(0x)?[0-9a-fA-F]*$")
+_LOG = logging.getLogger(__name__)
 
 def _truncate(s: str, max_len: int = 2000) -> str:
     if len(s) <= max_len:
@@ -768,13 +770,16 @@ def SelectOrchestrator(
         elif signer_url:
             discovery_endpoint = f"{_http_origin(signer_url)}/discover-orchestrators"
         else:
+            _LOG.debug("SelectOrchestrator failed: no orchestrators or discovery inputs")
             raise LivepeerGatewayError(
                 "SelectOrchestrator requires orchestrators, discovery_url, or signer_url"
             )
 
         try:
+            _LOG.debug("SelectOrchestrator running discovery: %s", discovery_endpoint)
             data = get_json(discovery_endpoint)
         except LivepeerGatewayError as e:
+            _LOG.debug("SelectOrchestrator discovery failed: %s", e)
             raise RemoteSignerError(
                 discovery_endpoint,
                 str(e),
@@ -782,11 +787,17 @@ def SelectOrchestrator(
             ) from None
 
         if not isinstance(data, list):
+            _LOG.debug(
+                "SelectOrchestrator discovery response not list: type=%s",
+                type(data).__name__,
+            )
             raise RemoteSignerError(
                 discovery_endpoint,
                 f"Discovery response must be a JSON list, got {type(data).__name__}",
                 cause=None,
             ) from None
+
+        _LOG.debug("SelectOrchestrator discovery response: %s", data)
 
         orch_list = []
         for item in data:
@@ -795,14 +806,15 @@ def SelectOrchestrator(
             address = item.get("address")
             if isinstance(address, str) and address.strip():
                 orch_list.append(address.strip())
+        _LOG.debug("SelectOrchestrator discovered %d orchestrators", len(orch_list))
 
     if not orch_list:
+        _LOG.debug("SelectOrchestrator failed: empty orchestrator list")
         raise NoOrchestratorAvailableError("No orchestrators available to select")
 
     candidates = orch_list[:5]
-    if not candidates:
-        raise NoOrchestratorAvailableError("No orchestrators available to select")
 
+    _LOG.debug("SelectOrchestrator trying candidates: %s", candidates)
     with ThreadPoolExecutor(max_workers=len(candidates)) as executor:
         futures = {
             executor.submit(GetOrchestratorInfo, url, signer_url=signer_url): url
@@ -813,10 +825,13 @@ def SelectOrchestrator(
             url = futures[future]
             try:
                 info = future.result()
-            except LivepeerGatewayError:
+            except LivepeerGatewayError as e:
+                _LOG.debug("SelectOrchestrator candidate failed: %s (%s)", url, e)
                 continue
+            _LOG.debug("SelectOrchestrator selected: %s", url)
             return url, info
 
+    _LOG.debug("SelectOrchestrator failed: all candidates errored")
     raise NoOrchestratorAvailableError("All orchestrators failed")
 
 
