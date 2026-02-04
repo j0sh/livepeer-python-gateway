@@ -5,6 +5,7 @@ from .media_publish import MediaPublish, MediaPublishConfig
 from .media_decode import AudioDecodedMediaFrame, DecodedMediaFrame, VideoDecodedMediaFrame
 from .media_output import MediaOutput
 from .orchestrator import (
+    DiscoverOrchestrators,
     GetOrchestratorInfo,
     LiveVideoToVideo,
     SelectOrchestrator,
@@ -16,6 +17,7 @@ from .trickle_subscriber import SegmentReader, TrickleSubscriber
 
 __all__ = [
     "Control",
+    "DiscoverOrchestrators",
     "GetOrchestratorInfo",
     "LiveVideoToVideo",
     "LivepeerGatewayError",

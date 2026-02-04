@@ -1,4 +1,5 @@
 import argparse
+import logging
 
 from livepeer_gateway.capabilities import (
     compute_available,
@@ -6,30 +7,67 @@ from livepeer_gateway.capabilities import (
     get_capacity_in_use,
     get_per_capability_map,
 )
-from livepeer_gateway.orchestrator import GetOrchestratorInfo, LivepeerGatewayError
-
-DEFAULT_ORCH = "localhost:8935"
+from livepeer_gateway.orchestrator import (
+    DiscoverOrchestrators,
+    GetOrchestratorInfo,
+    LivepeerGatewayError,
+)
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Fetch orchestrator info via Livepeer gRPC.")
+    p = argparse.ArgumentParser(
+        description="Fetch Livepeer orchestrator info.",
+        epilog=(
+            "Examples, in priority order of application (highest first):\n"
+            "  # Orchestrator list\n"
+            "  python examples/get_orchestrator_info.py localhost:8935 localhost:8936\n"
+            "  python examples/get_orchestrator_info.py 'localhost:8935,localhost:8936'\n"
+            "  python examples/get_orchestrator_info.py localhost:8935 --signer https://signer.example.com\n"
+            "\n"
+            "  # Discovery URL\n"
+            "  python examples/get_orchestrator_info.py --discovery https://discover.example.com/orchestrators\n"
+            "  python examples/get_orchestrator_info.py --discovery https://discover.example.com/orchestrators --signer https://signer.example.com\n"
+            "\n"
+            "  # Signer URL\n"
+            "  python examples/get_orchestrator_info.py --signer https://signer.example.com\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     p.add_argument(
         "orchestrators",
         nargs="*",
-        default=[DEFAULT_ORCH],
-        help=f"One or more orchestrator gRPC targets (host:port). Default: {DEFAULT_ORCH}",
+        help="Optional list of orchestrators (host:port) or comma-delimited string.",
+    )
+    p.add_argument(
+        "--discovery",
+        default=None,
+        help="Explicit discovery endpoint URL (overrides signer discovery).",
     )
     p.add_argument(
         "--signer",
         default=None,
-        help="Remote signer base URL (no path). If omitted, runs in offchain mode.",
+        help="Remote signer base URL (no path). Can be combined with list/discovery.",
+    )
+    p.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug logging for discovery diagnostics.",
     )
     return p.parse_args()
 
 def main() -> None:
     args = _parse_args()
 
-    for orch_url in args.orchestrators:
-        try:
+    if args.debug:
+        logging.basicConfig(level=logging.DEBUG)
+
+    try:
+        orch_list = DiscoverOrchestrators(
+            args.orchestrators,
+            signer_url=args.signer,
+            discovery_url=args.discovery,
+        )
+
+        for orch_url in orch_list:
             info = GetOrchestratorInfo(orch_url, signer_url=args.signer)
 
             print("=== OrchestratorInfo ===")
@@ -109,9 +147,9 @@ def main() -> None:
                 print("Hardware / GPU: not provided")
                 print()
 
-        except LivepeerGatewayError as e:
-            print(f"ERROR ({orch_url}): {e}")
-            print()
+    except LivepeerGatewayError as e:
+        print(f"ERROR: {e}")
+        print()
 
 def format_bytes(num_bytes: int) -> str:
     if num_bytes < 0:

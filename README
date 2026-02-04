@@ -8,7 +8,7 @@ Examples
 
 Offchain mode (no remote signer)
 ```
-uv run examples/get_orchestrator_info.py
+uv run examples/get_orchestrator_info.py localhost:8935
 ```
 
 On-chain mode

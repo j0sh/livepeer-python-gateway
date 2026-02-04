@@ -737,8 +737,81 @@ def GetOrchestratorInfo(orch_url: str, *, signer_url: Optional[str] = None) -> l
     return OrchestratorClient(orch_url, signer_url=signer_url).GetOrchestratorInfo()
 
 
+def DiscoverOrchestrators(
+    orchestrators: Optional[Sequence[str] | str] = None,
+    *,
+    signer_url: Optional[str] = None,
+    discovery_url: Optional[str] = None,
+) -> list[str]:
+    """
+    Discover orchestrators and return a list of addresses.
+
+    This discovery can happen via the following parameters in priority order (highest first):
+    - orchestrators: list or comma-delimited string
+      (empty/whitespace-only input falls through)
+    - discovery_url: use this discovery endpoint
+    - signer_url: use signer-provided discovery service
+    """
+    if orchestrators is not None:
+        if isinstance(orchestrators, str):
+            orch_list = [orch.strip() for orch in orchestrators.split(",")]
+        else:
+            try:
+                orch_list = list(orchestrators)
+            except TypeError as e:
+                raise LivepeerGatewayError(
+                    "DiscoverOrchestrators requires a list of orchestrator URLs or a comma-delimited string"
+                ) from e
+        orch_list = [orch.strip() for orch in orch_list if isinstance(orch, str) and orch.strip()]
+        if orch_list:
+            return orch_list
+
+    if discovery_url:
+        discovery_endpoint = _parse_http_url(discovery_url).geturl()
+    elif signer_url:
+        discovery_endpoint = f"{_http_origin(signer_url)}/discover-orchestrators"
+    else:
+        _LOG.debug("DiscoverOrchestrators failed: no discovery inputs")
+        raise LivepeerGatewayError("DiscoverOrchestrators requires discovery_url or signer_url")
+
+    try:
+        _LOG.debug("DiscoverOrchestrators running discovery: %s", discovery_endpoint)
+        data = get_json(discovery_endpoint)
+    except LivepeerGatewayError as e:
+        _LOG.debug("DiscoverOrchestrators discovery failed: %s", e)
+        raise RemoteSignerError(
+            discovery_endpoint,
+            str(e),
+            cause=e.__cause__ or e,
+        ) from None
+
+    if not isinstance(data, list):
+        _LOG.debug(
+            "DiscoverOrchestrators discovery response not list: type=%s",
+            type(data).__name__,
+        )
+        raise RemoteSignerError(
+            discovery_endpoint,
+            f"Discovery response must be a JSON list, got {type(data).__name__}",
+            cause=None,
+        ) from None
+
+    _LOG.debug("DiscoverOrchestrators discovery response: %s", data)
+
+    orch_list = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        address = item.get("address")
+        if isinstance(address, str) and address.strip():
+            orch_list.append(address.strip())
+    _LOG.debug("DiscoverOrchestrators discovered %d orchestrators", len(orch_list))
+
+    return orch_list
+
+
 def SelectOrchestrator(
-    orchestrators: Optional[Sequence[str]] = None,
+    orchestrators: Optional[Sequence[str] | str] = None,
     *,
     signer_url: Optional[str] = None,
     discovery_url: Optional[str] = None,
@@ -750,63 +823,11 @@ def SelectOrchestrator(
     - discovery_url, if provided
     - otherwise {signer_url}/discover-orchestrators
     """
-    if orchestrators is None:
-        orch_list: list[str] = []
-    elif isinstance(orchestrators, str):
-        orch_list = [orchestrators]
-    else:
-        try:
-            orch_list = list(orchestrators)
-        except TypeError as e:
-            raise LivepeerGatewayError(
-                "SelectOrchestrator requires an iterable of orchestrator URLs"
-            ) from e
-
-    orch_list = [orch.strip() for orch in orch_list if isinstance(orch, str) and orch.strip()]
-
-    if not orch_list:
-        if discovery_url:
-            discovery_endpoint = _parse_http_url(discovery_url).geturl()
-        elif signer_url:
-            discovery_endpoint = f"{_http_origin(signer_url)}/discover-orchestrators"
-        else:
-            _LOG.debug("SelectOrchestrator failed: no orchestrators or discovery inputs")
-            raise LivepeerGatewayError(
-                "SelectOrchestrator requires orchestrators, discovery_url, or signer_url"
-            )
-
-        try:
-            _LOG.debug("SelectOrchestrator running discovery: %s", discovery_endpoint)
-            data = get_json(discovery_endpoint)
-        except LivepeerGatewayError as e:
-            _LOG.debug("SelectOrchestrator discovery failed: %s", e)
-            raise RemoteSignerError(
-                discovery_endpoint,
-                str(e),
-                cause=e.__cause__ or e,
-            ) from None
-
-        if not isinstance(data, list):
-            _LOG.debug(
-                "SelectOrchestrator discovery response not list: type=%s",
-                type(data).__name__,
-            )
-            raise RemoteSignerError(
-                discovery_endpoint,
-                f"Discovery response must be a JSON list, got {type(data).__name__}",
-                cause=None,
-            ) from None
-
-        _LOG.debug("SelectOrchestrator discovery response: %s", data)
-
-        orch_list = []
-        for item in data:
-            if not isinstance(item, dict):
-                continue
-            address = item.get("address")
-            if isinstance(address, str) and address.strip():
-                orch_list.append(address.strip())
-        _LOG.debug("SelectOrchestrator discovered %d orchestrators", len(orch_list))
+    orch_list = DiscoverOrchestrators(
+        orchestrators,
+        signer_url=signer_url,
+        discovery_url=discovery_url,
+    )
 
     if not orch_list:
         _LOG.debug("SelectOrchestrator failed: empty orchestrator list")
