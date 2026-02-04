@@ -1,10 +1,16 @@
 from .control import Control
-from .errors import LivepeerGatewayError
+from .errors import LivepeerGatewayError, NoOrchestratorAvailableError
 from .events import Events
 from .media_publish import MediaPublish, MediaPublishConfig
 from .media_decode import AudioDecodedMediaFrame, DecodedMediaFrame, VideoDecodedMediaFrame
 from .media_output import MediaOutput
-from .orchestrator import GetOrchestratorInfo, LiveVideoToVideo, StartJob, StartJobRequest
+from .orchestrator import (
+    GetOrchestratorInfo,
+    LiveVideoToVideo,
+    SelectOrchestrator,
+    StartJob,
+    StartJobRequest,
+)
 from .trickle_publisher import TricklePublisher
 from .trickle_subscriber import SegmentReader, TrickleSubscriber
 
@@ -13,12 +19,14 @@ __all__ = [
     "GetOrchestratorInfo",
     "LiveVideoToVideo",
     "LivepeerGatewayError",
+    "NoOrchestratorAvailableError",
     "MediaPublish",
     "MediaPublishConfig",
     "MediaOutput",
     "AudioDecodedMediaFrame",
     "DecodedMediaFrame",
     "Events",
+    "SelectOrchestrator",
     "StartJob",
     "StartJobRequest",
     "TricklePublisher",

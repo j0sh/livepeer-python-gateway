@@ -9,9 +9,10 @@ import re
 import socket
 import ssl
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Any, Optional, Tuple
+from typing import Any, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 from urllib.error import URLError, HTTPError
 from urllib.request import Request, urlopen
@@ -25,7 +26,7 @@ from .control import Control
 from .events import Events
 from .media_publish import MediaPublish, MediaPublishConfig
 from .media_output import MediaOutput
-from .errors import LivepeerGatewayError
+from .errors import LivepeerGatewayError, NoOrchestratorAvailableError
 
 _HEX_RE = re.compile(r"^(0x)?[0-9a-fA-F]*$")
 
@@ -732,6 +733,91 @@ def GetOrchestratorInfo(orch_url: str, *, signer_url: Optional[str] = None) -> l
     Always uses secure channel (TLS) with certificate verification disabled.
     """
     return OrchestratorClient(orch_url, signer_url=signer_url).GetOrchestratorInfo()
+
+
+def SelectOrchestrator(
+    orchestrators: Optional[Sequence[str]] = None,
+    *,
+    signer_url: Optional[str] = None,
+    discovery_url: Optional[str] = None,
+) -> Tuple[str, lp_rpc_pb2.OrchestratorInfo]:
+    """
+    Select an orchestrator by trying up to ~5 candidates in parallel.
+
+    If orchestrators is empty/None, a discovery endpoint is used:
+    - discovery_url, if provided
+    - otherwise {signer_url}/discover-orchestrators
+    """
+    if orchestrators is None:
+        orch_list: list[str] = []
+    elif isinstance(orchestrators, str):
+        orch_list = [orchestrators]
+    else:
+        try:
+            orch_list = list(orchestrators)
+        except TypeError as e:
+            raise LivepeerGatewayError(
+                "SelectOrchestrator requires an iterable of orchestrator URLs"
+            ) from e
+
+    orch_list = [orch.strip() for orch in orch_list if isinstance(orch, str) and orch.strip()]
+
+    if not orch_list:
+        if discovery_url:
+            discovery_endpoint = _parse_http_url(discovery_url).geturl()
+        elif signer_url:
+            discovery_endpoint = f"{_http_origin(signer_url)}/discover-orchestrators"
+        else:
+            raise LivepeerGatewayError(
+                "SelectOrchestrator requires orchestrators, discovery_url, or signer_url"
+            )
+
+        try:
+            data = get_json(discovery_endpoint)
+        except LivepeerGatewayError as e:
+            raise RemoteSignerError(
+                discovery_endpoint,
+                str(e),
+                cause=e.__cause__ or e,
+            ) from None
+
+        if not isinstance(data, list):
+            raise RemoteSignerError(
+                discovery_endpoint,
+                f"Discovery response must be a JSON list, got {type(data).__name__}",
+                cause=None,
+            ) from None
+
+        orch_list = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            address = item.get("address")
+            if isinstance(address, str) and address.strip():
+                orch_list.append(address.strip())
+
+    if not orch_list:
+        raise NoOrchestratorAvailableError("No orchestrators available to select")
+
+    candidates = orch_list[:5]
+    if not candidates:
+        raise NoOrchestratorAvailableError("No orchestrators available to select")
+
+    with ThreadPoolExecutor(max_workers=len(candidates)) as executor:
+        futures = {
+            executor.submit(GetOrchestratorInfo, url, signer_url=signer_url): url
+            for url in candidates
+        }
+
+        for future in as_completed(futures):
+            url = futures[future]
+            try:
+                info = future.result()
+            except LivepeerGatewayError:
+                continue
+            return url, info
+
+    raise NoOrchestratorAvailableError("All orchestrators failed")
 
 
 @dataclass
