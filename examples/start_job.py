@@ -48,15 +48,13 @@ def main() -> None:
                 model_id=args.model,
             ),
             signer_base_url=args.signer,
-            discovery_url=args.discovery_url,
+            discovery_url=args.discovery,
         )
-        info = job.orchestrator_info
-        if info is None:
-            raise LivepeerGatewayError("start_lv2v did not return orchestrator info")
+        orch = job.orchestrator_info
 
         print("=== OrchestratorInfo ===")
-        print("Orchestrator:", info.transcoder)
-        print("ETH Address:", info.address.hex())
+        print("Orchestrator:", orch.transcoder)
+        print("ETH Address:", orch.address.hex())
         print()
 
         print("=== start_lv2v ===")
