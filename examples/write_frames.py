@@ -7,7 +7,6 @@ import av
 from livepeer_gateway.media_publish import MediaPublishConfig
 from livepeer_gateway.orchestrator import LivepeerGatewayError, StartJobRequest, start_lv2v
 
-DEFAULT_ORCH = "localhost:8935"
 DEFAULT_MODEL_ID = "noop"  # fix
 
 
@@ -16,8 +15,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "orchestrator",
         nargs="?",
-        default=DEFAULT_ORCH,
-        help=f"Orchestrator gRPC target (host:port). Default: {DEFAULT_ORCH}",
+        default=None,
+        help="Orchestrator (host:port). If omitted, discovery is used.",
     )
     p.add_argument(
         "--signer",
@@ -70,7 +69,7 @@ async def main() -> None:
             await media.write_frame(frame)
             await asyncio.sleep(frame_interval)
     except LivepeerGatewayError as e:
-        print(f"ERROR ({args.orchestrator}): {e}")
+        print(f"ERROR: {e}")
     finally:
         if job is not None:
             await job.close()

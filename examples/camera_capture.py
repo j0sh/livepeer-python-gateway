@@ -14,7 +14,6 @@ import av
 from livepeer_gateway.media_publish import MediaPublishConfig
 from livepeer_gateway.orchestrator import LivepeerGatewayError, StartJobRequest, start_lv2v
 
-DEFAULT_ORCH = "localhost:8935"
 DEFAULT_MODEL_ID = "noop" # fix
 DEFAULT_DEVICE = "0"
 DEFAULT_FPS = 30.0
@@ -46,8 +45,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "orchestrator",
         nargs="?",
-        default=DEFAULT_ORCH,
-        help=f"Orchestrator gRPC target (host:port). Default: {DEFAULT_ORCH}",
+        default=None,
+        help="Orchestrator (host:port). If omitted, discovery is used.",
     )
     p.add_argument(
         "--signer",
@@ -181,7 +180,7 @@ async def main() -> None:
     except KeyboardInterrupt:
         print("Recording stopped by user")
     except LivepeerGatewayError as e:
-        print(f"Error processing frame ({args.orchestrator}): {e}")
+        print(f"Error processing frame: {e}")
     finally:
         stop_event.set()
         if output_task is not None:
@@ -197,7 +196,7 @@ async def main() -> None:
             try:
                 await job.close()
             except LivepeerGatewayError as e:
-                print(f"Error closing job ({args.orchestrator}): {e}")
+                print(f"Error closing job: {e}")
 
 
 if __name__ == "__main__":

@@ -19,27 +19,27 @@ uv run examples/get_orchestrator_info.py --signer-url "<signer-host:port>"
 
 Write raw frames to a LiveVideoToVideo job
 ```
-uv run examples/write_frames.py
+uv run examples/write_frames.py localhost:8935
 ```
 
 Capture MacOS camera frames and publish via write_frame
 ```
-uv run examples/camera_capture.py
+uv run examples/camera_capture.py localhost:8935
 ```
 
 Capture MacOS camera frames and subscribe to media output (stdout or file)
 ```
-uv run examples/camera_capture.py --output - | ffplay -fflags nobuffer -flags low_delay -probesize 32 -i -
-uv run examples/camera_capture.py --output out.ts
+uv run examples/camera_capture.py localhost:8935 --output - | ffplay -fflags nobuffer -flags low_delay -probesize 32 -i -
+uv run examples/camera_capture.py localhost:8935 --output out.ts
 ```
 
 Composite camera input and decoded output side-by-side with PTS delta
 ```
 uv sync --group examples
-uv run examples/in_out_composite.py.py
+uv run examples/in_out_composite.py localhost:8935
 ```
 
 Subscribe to a LiveVideoToVideo trickle events channel
 ```
-uv run examples/subscribe_events.py
+uv run examples/subscribe_events.py localhost:8935
 ```

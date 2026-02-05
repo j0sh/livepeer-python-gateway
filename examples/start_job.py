@@ -64,8 +64,7 @@ def main() -> None:
         print()
 
     except LivepeerGatewayError as e:
-        context = args.orchestrator or args.discovery_url or "discovery"
-        print(f"ERROR ({context}): {e}")
+        print(f"ERROR: {e}")
         print()
 
 if __name__ == "__main__":
