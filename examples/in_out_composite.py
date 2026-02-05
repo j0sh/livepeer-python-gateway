@@ -5,26 +5,33 @@ of input, loopback, output, and an empty tile with latency overlays.
 
 import argparse
 import asyncio
-from collections import deque
 import logging
 import queue
 import threading
 import time
+from collections import deque
 from contextlib import suppress
 from fractions import Fraction
 from typing import Optional
 
 import av
 
-from livepeer_gateway.media_publish import MediaPublishConfig
-from livepeer_gateway.media_output import MediaOutput
-from livepeer_gateway.orchestrator import LivepeerGatewayError, StartJobRequest, start_lv2v
+from livepeer_gateway import (
+    LivePaymentConfig,
+    LivepeerGatewayError,
+    MediaOutput,
+    MediaPublishConfig,
+    OrchestratorSession,
+    StartJobRequest,
+)
 
-DEFAULT_MODEL_ID = "noop"  # fix
+DEFAULT_ORCH = "localhost:8935"
+DEFAULT_MODEL_ID = "noop"
 DEFAULT_DEVICE = "0"
 DEFAULT_FPS = 30.0
 DEFAULT_VIDEO_SIZE = "640x480"
 DEFAULT_PIXEL_FORMAT = "nv12"
+DEFAULT_PAYMENT_INTERVAL = 5.0
 _TIME_BASE = 90_000
 _STOP = object()
 
@@ -91,6 +98,12 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         default=3.5,
         help="Moving average window in seconds for latency metrics (default: 3.5).",
+    )
+    p.add_argument(
+        "--payment-interval",
+        type=float,
+        default=DEFAULT_PAYMENT_INTERVAL,
+        help=f"Payment interval in seconds (default: {DEFAULT_PAYMENT_INTERVAL}).",
     )
     return p.parse_args()
 
@@ -340,16 +353,39 @@ async def main() -> None:
 
         cv2.destroyAllWindows()
 
-    try:
-        job = start_lv2v(
-            args.orchestrator,
-            StartJobRequest(model_id=args.model),
-            signer_base_url=args.signer,
+    # Parse video size for payment config
+    width, height = 640, 480
+    if args.video_size:
+        try:
+            w, h = args.video_size.split("x")
+            width, height = int(w), int(h)
+        except ValueError:
+            pass
+
+    # Configure live payments if signer is provided
+    live_payment_config = None
+    if args.signer:
+        live_payment_config = LivePaymentConfig(
+            interval_s=args.payment_interval,
+            width=width,
+            height=height,
+            fps=args.fps,
         )
+
+    session = OrchestratorSession(
+        args.orchestrator,
+        signer_url=args.signer,
+        live_payment_config=live_payment_config,
+    )
+
+    try:
+        job = session.start_job(StartJobRequest(model_id=args.model_id))
 
         print("=== LiveVideoToVideo ===")
         print("publish_url:", job.publish_url)
         print("subscribe_url:", job.subscribe_url)
+        if args.signer and live_payment_config:
+            print(f"live payments: enabled (interval={args.payment_interval}s)")
         print()
 
         media = job.start_media(MediaPublishConfig(fps=args.fps))
@@ -428,11 +464,7 @@ async def main() -> None:
                 input_.close()
             except Exception:
                 pass
-        if job is not None:
-            try:
-                await job.close()
-            except LivepeerGatewayError as e:
-                print(f"Error closing job: {e}")
+        await session.aclose()
 
 
 if __name__ == "__main__":

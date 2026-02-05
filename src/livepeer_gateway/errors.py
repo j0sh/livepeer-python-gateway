@@ -10,3 +10,8 @@ class LivepeerGatewayError(RuntimeError):
 
 class NoOrchestratorAvailableError(LivepeerGatewayError):
     """Raised when no orchestrator could be selected."""
+
+
+class SessionRefreshRequired(LivepeerGatewayError):
+    """Raised when remote signer returns HTTP 480, indicating OrchestratorInfo refresh needed."""
+    pass

@@ -1,18 +1,20 @@
 from .capabilities import CapabilityId, build_capabilities
 from .control import Control
-from .errors import LivepeerGatewayError, NoOrchestratorAvailableError
+from .errors import LivepeerGatewayError, NoOrchestratorAvailableError, SessionRefreshRequired
 from .events import Events
+from .live_payment import LivePaymentConfig, LivePaymentSender
 from .media_publish import MediaPublish, MediaPublishConfig
 from .media_decode import AudioDecodedMediaFrame, DecodedMediaFrame, VideoDecodedMediaFrame
 from .media_output import MediaOutput
 from .orchestrator import (
     DiscoverOrchestrators,
     GetOrchestratorInfo,
-    LiveVideoToVideo,
+    LiveVideoToVideo, PaymentState,
     SelectOrchestrator,
     StartJobRequest,
     start_lv2v,
 )
+from .orchestrator_session import OrchestratorSession
 from .trickle_publisher import TricklePublisher
 from .trickle_subscriber import SegmentReader, TrickleSubscriber
 
@@ -22,6 +24,8 @@ __all__ = [
     "build_capabilities",
     "DiscoverOrchestrators",
     "GetOrchestratorInfo",
+    "LivePaymentConfig",
+    "LivePaymentSender",
     "LiveVideoToVideo",
     "LivepeerGatewayError",
     "NoOrchestratorAvailableError",
@@ -31,6 +35,9 @@ __all__ = [
     "AudioDecodedMediaFrame",
     "DecodedMediaFrame",
     "Events",
+    "OrchestratorSession",
+    "PaymentState",
+    "SessionRefreshRequired",
     "SelectOrchestrator",
     "StartJobRequest",
     "start_lv2v",

@@ -13,6 +13,7 @@ from livepeer_gateway.orchestrator import (
     LivepeerGatewayError,
 )
 
+
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Fetch Livepeer orchestrator info.",
@@ -34,7 +35,7 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "orchestrators",
-        nargs="*",
+        nargs="+",
         help="Optional list of orchestrators (host:port) or comma-delimited string.",
     )
     p.add_argument(

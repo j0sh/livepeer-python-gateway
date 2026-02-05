@@ -28,10 +28,12 @@ from .control import Control
 from .events import Events
 from .media_publish import MediaPublish, MediaPublishConfig
 from .media_output import MediaOutput
-from .errors import LivepeerGatewayError, NoOrchestratorAvailableError
+from .errors import LivepeerGatewayError, NoOrchestratorAvailableError, SessionRefreshRequired
 
 _HEX_RE = re.compile(r"^(0x)?[0-9a-fA-F]*$")
 _LOG = logging.getLogger(__name__)
+
+CAPABILITY_LIVE_VIDEO_TO_VIDEO = 35
 
 def _truncate(s: str, max_len: int = 2000) -> str:
     if len(s) <= max_len:
@@ -118,6 +120,11 @@ def request_json(
             raw = resp.read().decode("utf-8")
         data: Any = json.loads(raw)
     except HTTPError as e:
+        # HTTP 480 is HTTPStatusRefreshSession - signals need to refresh OrchestratorInfo
+        if e.code == 480:
+            raise SessionRefreshRequired(
+                f"Remote signer requires session refresh (HTTP 480)"
+            ) from e
         body = _extract_error_message(e)
         body_part = f"; body={body!r}" if body else ""
         raise LivepeerGatewayError(
@@ -205,6 +212,69 @@ def _http_origin(url: str) -> str:
     """
     parsed = _parse_http_url(url)
     return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def build_capabilities(capability: int, constraint: Optional[str]) -> lp_rpc_pb2.Capabilities:
+    """
+    Build a capabilities message with an optional constraint for a specific capability.
+    """
+    caps = lp_rpc_pb2.Capabilities()
+    if capability:
+        caps.capacities[capability] = 1
+        if constraint:
+            if not caps.HasField("constraints"):
+                caps.constraints.CopyFrom(lp_rpc_pb2.Capabilities.Constraints())
+            constraints = caps.constraints
+            per_cap = getattr(constraints, "PerCapability", None) or getattr(constraints, "per_capability", None)
+            if per_cap is None:
+                per_cap = constraints.PerCapability
+            per_cap[capability].models[constraint].warm = False
+    return caps
+
+
+def _select_price_info(
+    info: lp_rpc_pb2.OrchestratorInfo,
+    *,
+    typ: str,
+    model_id: Optional[str],
+) -> lp_rpc_pb2.PriceInfo:
+    """
+    Choose the price info to use for a payment request.
+
+    For LV2V, prefer a capability-scoped price that matches the requested model ID.
+    Fallback to the general price_info only if no matching capability price exists.
+    """
+    if typ == "lv2v":
+        if not model_id:
+            raise LivepeerGatewayError("GetPayment requires model_id for LV2V pricing.")
+
+        # Capability 35 corresponds to Live video to video.
+        for pi in info.capabilities_prices:
+            if (
+                pi.capability == CAPABILITY_LIVE_VIDEO_TO_VIDEO
+                and pi.pricePerUnit > 0
+                and pi.pixelsPerUnit > 0
+                and pi.constraint == model_id
+            ):
+                return pi
+
+        # No matching capability price; fall back to general price if valid.
+        if info.HasField("price_info") and info.price_info.pricePerUnit > 0 and info.price_info.pixelsPerUnit > 0:
+            return info.price_info
+
+        raise LivepeerGatewayError(
+            f"No capability price found for LV2V model_id={model_id}; orchestrator did not return usable pricing."
+        )
+
+    # Non-LV2V: use general price_info first, otherwise any valid capability price.
+    if info.HasField("price_info") and info.price_info.pricePerUnit > 0 and info.price_info.pixelsPerUnit > 0:
+        return info.price_info
+
+    for pi in info.capabilities_prices:
+        if pi.pricePerUnit > 0 and pi.pixelsPerUnit > 0:
+            return pi
+
+    raise LivepeerGatewayError("Orchestrator did not return usable pricing information.")
 
 
 @dataclass(frozen=True)
@@ -327,10 +397,52 @@ class LiveVideoToVideo:
             if isinstance(result, BaseException):
                 raise result
 
+
+@dataclass
+class PaymentState:
+    """
+    Opaque state blob returned by the remote signer that must be sent with
+    subsequent payment requests to ensure unique ticket nonces.
+
+    Note: Go's RemotePaymentStateSig struct uses capitalized field names (State, Sig)
+    with no JSON tags, so we must match that casing in JSON serialization.
+    """
+    state: Optional[bytes] = None
+    sig: Optional[bytes] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to JSON-serializable dict for the request payload.
+
+        Uses capitalized keys (State, Sig) to match Go's JSON marshaling.
+        """
+        if self.state is None and self.sig is None:
+            return {}
+        result = {}
+        if self.state is not None:
+            result["State"] = base64.b64encode(self.state).decode("ascii")
+        if self.sig is not None:
+            result["Sig"] = base64.b64encode(self.sig).decode("ascii")
+        return result
+
+    @staticmethod
+    def from_dict(data: dict[str, Any]) -> "PaymentState":
+        """Parse from JSON response.
+
+        Expects capitalized keys (State, Sig) from Go's JSON marshaling.
+        """
+        state_b64 = data.get("State")
+        sig_b64 = data.get("Sig")
+        return PaymentState(
+            state=base64.b64decode(state_b64) if state_b64 else None,
+            sig=base64.b64decode(sig_b64) if sig_b64 else None,
+        )
+
+
 @dataclass(frozen=True)
 class GetPaymentResponse:
     payment: str
     seg_creds: Optional[str] = None
+    state: Optional[PaymentState] = None
 
 
 def GetPayment(
@@ -338,14 +450,26 @@ def GetPayment(
     info: lp_rpc_pb2.OrchestratorInfo,
     *,
     typ: str = "lv2v",
+    model_id: Optional[str] = None,
+    state: Optional[PaymentState] = None,
+    manifest_id: Optional[str] = None,
 ) -> GetPaymentResponse:
     """
     Call the remote signer to generate an automatic payment for a job.
 
     POST {signer_base_url}/generate-live-payment with:
-      orchestrator: base64 protobuf bytes of net.PaymentResult containing OrchestratorInfo
-      type: job type (default: lv2v)
+      orchestrator: base64 protobuf bytes of OrchestratorInfo
+      priceInfo: pricing selected by the gateway (capability + constraint/model)
+      state: optional opaque state from previous payment (for nonce tracking)
+      manifestId: optional manifest ID for the payment
+
+    The returned GetPaymentResponse includes the updated state which must be
+    passed to subsequent calls to ensure unique ticket nonces.
     """
+    if typ == "lv2v" and not model_id:
+        raise LivepeerGatewayError(
+            "GetPayment requires model_id when requesting LV2V payments."
+        )
 
     if not signer_base_url:
         # Offchain mode: still send the expected headers, but with empty content.
@@ -358,22 +482,65 @@ def GetPayment(
         seg = base64.b64encode(seg.SerializeToString()).decode("ascii")
         return GetPaymentResponse(seg_creds=seg, payment="")
 
-    # Price info must be valid
-    has_price_info = info.HasField("price_info")
-    price_is_zero = has_price_info and info.price_info.pricePerUnit == 0
-    if not has_price_info or price_is_zero:
+    # Select the appropriate price info based on type and model_id
+    price_info = _select_price_info(info, typ=typ, model_id=model_id)
+
+    # Validate the selected price has non-zero values
+    if price_info.pricePerUnit <= 0 or price_info.pixelsPerUnit <= 0:
         raise LivepeerGatewayError(
-            "Valid price info required when using remote signer. "
-            "The orchestrator returned missing or zero price_info."
+            f"Selected price_info has zero values: pricePerUnit={price_info.pricePerUnit}, "
+            f"pixelsPerUnit={price_info.pixelsPerUnit}, model_id={model_id}"
+        )
+
+    # Populate price_info on the OrchestratorInfo protobuf that will be sent to the signer.
+    info_for_payment = lp_rpc_pb2.OrchestratorInfo()
+    info_for_payment.CopyFrom(info)
+    info_for_payment.price_info.pricePerUnit = price_info.pricePerUnit
+    info_for_payment.price_info.pixelsPerUnit = price_info.pixelsPerUnit
+    info_for_payment.price_info.capability = price_info.capability
+    info_for_payment.price_info.constraint = price_info.constraint
+
+    # Verify the copy worked correctly
+    if info_for_payment.price_info.pricePerUnit <= 0 or info_for_payment.price_info.pixelsPerUnit <= 0:
+        raise LivepeerGatewayError(
+            f"Failed to set price_info on OrchestratorInfo: pricePerUnit={info_for_payment.price_info.pricePerUnit}, "
+            f"pixelsPerUnit={info_for_payment.price_info.pixelsPerUnit}"
         )
 
     base = _http_origin(signer_base_url)
     url = f"{base}/generate-live-payment"
 
-    pb = info.SerializeToString()
+    # base64 protobuf bytes of OrchestratorInfo (NOT wrapped in PaymentResult)
+    pb = info_for_payment.SerializeToString()
     orch_b64 = base64.b64encode(pb).decode("ascii")
 
-    data = post_json(url, {"orchestrator": orch_b64, "type": typ})
+    capability = price_info.capability
+    if typ == "lv2v" and capability == 0:
+        capability = CAPABILITY_LIVE_VIDEO_TO_VIDEO
+    constraint = price_info.constraint or (model_id or "")
+
+    payload: dict[str, Any] = {
+        "orchestrator": orch_b64,
+        "priceInfo": {
+            "pricePerUnit": price_info.pricePerUnit,
+            "pixelsPerUnit": price_info.pixelsPerUnit,
+            "capability": capability,
+            "constraint": constraint,
+        },
+        "type": typ,
+    }
+
+    # Include state if provided (required for subsequent payments to get unique nonces)
+    if state is not None:
+        state_dict = state.to_dict()
+        if state_dict:
+            payload["state"] = state_dict
+
+    # Include manifest ID if provided
+    if manifest_id:
+        payload["manifestId"] = manifest_id
+
+    data = post_json(url, payload)
 
     payment = data.get("payment")
     if not isinstance(payment, str) or not payment:
@@ -383,7 +550,25 @@ def GetPayment(
     if seg_creds is not None and not isinstance(seg_creds, str):
         raise LivepeerGatewayError(f"GetPayment error: invalid 'segCreds' in response (url={url})")
 
-    return GetPaymentResponse(payment=payment, seg_creds=seg_creds)
+    # Parse the returned state for use in subsequent calls
+    new_state = None
+    state_data = data.get("state")
+    if isinstance(state_data, dict):
+        new_state = PaymentState.from_dict(state_data)
+
+    return GetPaymentResponse(payment=payment, seg_creds=seg_creds, state=new_state)
+
+
+def _start_job_with_headers(
+    info: lp_rpc_pb2.OrchestratorInfo,
+    req: StartJobRequest,
+    headers: dict[str, Optional[str]],
+) -> LiveVideoToVideo:
+    """Internal helper to start a job with pre-built headers."""
+    base = _http_origin(info.transcoder)
+    url = f"{base}/live-video-to-video"
+    data = post_json(url, req.to_json(), headers=headers)
+    return LiveVideoToVideo.from_json(data)
 
 
 def start_lv2v(
@@ -410,19 +595,13 @@ def start_lv2v(
         capabilities=capabilities,
     )
 
-    p = GetPayment(signer_base_url, info)
-    headers: dict[str, str] = {
+    p = GetPayment(signer_base_url, info, model_id=req.model_id)
+    headers: dict[str, Optional[str]] = {
         "Livepeer-Payment": p.payment,
         "Livepeer-Segment": p.seg_creds,
     }
 
-    base = _http_origin(info.transcoder)
-    url = f"{base}/live-video-to-video"
-    data = post_json(url, req.to_json(), headers=headers)
-    return LiveVideoToVideo.from_json(
-        data,
-        orchestrator_info=info,
-    )
+    return _start_job_with_headers(info, req, headers)
 
 
 
@@ -705,10 +884,17 @@ class OrchestratorClient:
         self._channel = grpc.secure_channel(target, credentials, options=options)
         self._stub = lp_rpc_pb2_grpc.OrchestratorStub(self._channel)
 
-    def GetOrchestratorInfo(self) -> lp_rpc_pb2.OrchestratorInfo:
+    def GetOrchestratorInfo(
+        self,
+        *,
+        caps: Optional[lp_rpc_pb2.Capabilities] = None,
+    ) -> lp_rpc_pb2.OrchestratorInfo:
         """
         Wrapper for the Orchestrator RPC method GetOrchestrator(...)
         but exposed as GetOrchestratorInfo() for convenience.
+
+        If caps is provided, the orchestrator will return pricing specific to
+        the requested capability and constraint (e.g., model_id for LV2V).
         """
         try:
             signer = _get_signer_material(self.signer_url)
@@ -723,6 +909,7 @@ class OrchestratorClient:
         request = lp_rpc_pb2.OrchestratorRequest(
             address=signer.address,
             sig=signer.sig,
+            capabilities=caps,
             ignoreCapacityCheck=True,
         )
         if self.capabilities is not None:
@@ -753,18 +940,28 @@ def GetOrchestratorInfo(
     *,
     signer_url: Optional[str] = None,
     capabilities: Optional[lp_rpc_pb2.Capabilities] = None,
+    caps: Optional[lp_rpc_pb2.Capabilities] = None,
+    typ: str = "lv2v",
+    model_id: Optional[str] = None,
 ) -> lp_rpc_pb2.OrchestratorInfo:
     """
     Public functional API:
-        GetOrchestratorInfo(orch_url, signer_url=...)
+        GetOrchestratorInfo(orch_url, signer_url=..., typ="lv2v", model_id=...)
     Remote signer is called once per process (cached).
     Always uses secure channel (TLS) with certificate verification disabled.
+
+    For live-video-to-video (typ="lv2v"), if a model_id is provided we
+    request orchestrator info with capability 35 and constraint=model_id so
+    ticket params align with the requested model.
     """
+    effective_caps = caps
+    if typ == "lv2v" and model_id:
+        effective_caps = build_capabilities(CAPABILITY_LIVE_VIDEO_TO_VIDEO, model_id)
     return OrchestratorClient(
         orch_url,
         signer_url=signer_url,
         capabilities=capabilities,
-    ).GetOrchestratorInfo()
+    ).GetOrchestratorInfo(caps=effective_caps)
 
 
 def DiscoverOrchestrators(
