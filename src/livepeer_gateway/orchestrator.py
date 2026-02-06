@@ -19,7 +19,7 @@ from .errors import (
     SkipPaymentCycle,
 )
 from .orch_info import get_orch_info
-from .payments import RemoteSignerError
+from .remote_signer import RemoteSignerError
 
 _LOG = logging.getLogger(__name__)
 

@@ -21,9 +21,10 @@ class MediaOutput:
     """
     Access a trickle media output
 
-    Exposes both:
+    Exposes:
       - per-segment iteration (SegmentReader objects)
       - continuous byte stream (bytes chunks)
+      - individual audio and video frames
     """
 
     def __init__(

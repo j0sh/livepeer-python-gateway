@@ -14,7 +14,7 @@ from .events import Events
 from .media_output import MediaOutput
 from .media_publish import MediaPublish, MediaPublishConfig
 from .orchestrator import SelectOrchestrator, _http_origin, post_json
-from .payments import PaymentSession
+from .remote_signer import PaymentSession
 from .trickle_subscriber import TrickleSubscriber
 
 _LOG = logging.getLogger(__name__)

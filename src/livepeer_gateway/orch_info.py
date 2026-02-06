@@ -16,7 +16,7 @@ import grpc
 from . import lp_rpc_pb2
 from . import lp_rpc_pb2_grpc
 from .errors import LivepeerGatewayError
-from .payments import get_orch_info_sig
+from .remote_signer import get_orch_info_sig
 
 _LOG = logging.getLogger(__name__)
 
