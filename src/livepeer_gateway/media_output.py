@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+"""
+Helpers for consuming trickle media outputs as segments, bytes, or frames.
+"""
+
 import asyncio
 from contextlib import suppress
 from typing import AsyncIterator, Optional
@@ -26,6 +30,10 @@ class MediaOutput:
       - per-segment iteration (SegmentReader objects)
       - continuous byte stream (bytes chunks)
       - individual audio and video frames
+
+    Segments are sourced from a single shared subscriber so that multiple
+    iterators can consume the same output concurrently without duplicate
+    network requests.
     """
 
     def __init__(
@@ -45,29 +53,27 @@ class MediaOutput:
         self.connection_close = connection_close
         self.chunk_size = chunk_size
 
+        self._sub: Optional[TrickleSubscriber] = None
+        self._segments: list[SegmentReader] = []
+        self._lock = asyncio.Lock()
+        self._eos = False
+
     def segments(
         self,
     ) -> AsyncIterator[SegmentReader]:
         """
         Read the trickle media channel and yield SegmentReader objects.
 
-        The caller is responsible for closing each segment.
+        Segments are shared across iterators.
         """
-        url = self.subscribe_url
-
         async def _iter() -> AsyncIterator[SegmentReader]:
-            async with TrickleSubscriber(
-                url,
-                start_seq=self.start_seq,
-                max_retries=self.max_retries,
-                max_bytes=self.max_segment_bytes,
-                connection_close=self.connection_close,
-            ) as subscriber:
-                while True:
-                    segment = await subscriber.next()
-                    if segment is None:
-                        break
-                    yield segment
+            index = 0
+            while True:
+                segment = await self._next_segment(index)
+                if segment is None:
+                    break
+                yield segment
+                index += 1
 
         return _iter()
 
@@ -132,20 +138,65 @@ class MediaOutput:
         self,
     ) -> AsyncIterator[bytes]:
         checked_content_type = False
-        async for segment in self.segments(
-        ):
+        index = 0
+        while True:
+            segment = await self._next_segment(index)
+            if segment is None:
+                break
             if not checked_content_type:
                 _require_mpegts_content_type(segment.headers().get("Content-Type"))
                 checked_content_type = True
-            try:
-                reader = segment.make_reader()
-                while True:
-                    chunk = await reader.read(chunk_size=self.chunk_size)
-                    if not chunk:
-                        break
-                    yield chunk
-            finally:
-                await segment.close()
+            reader = segment.make_reader()
+            while True:
+                chunk = await reader.read(chunk_size=self.chunk_size)
+                if not chunk:
+                    break
+                yield chunk
+            index += 1
+
+    async def _next_segment(self, index: int) -> Optional[SegmentReader]:
+        """
+        Return the segment at index, lazily advancing the subscriber if needed.
+        """
+        if index < len(self._segments):
+            return self._segments[index]
+
+        async with self._lock:
+            while len(self._segments) <= index:
+                if self._eos:
+                    return None
+                if self._sub is None:
+                    self._sub = TrickleSubscriber(
+                        self.subscribe_url,
+                        start_seq=self.start_seq,
+                        max_retries=self.max_retries,
+                        max_bytes=self.max_segment_bytes,
+                        connection_close=self.connection_close,
+                    )
+                    await self._sub.__aenter__()
+                segment = await self._sub.next()
+                if segment is None:
+                    self._eos = True
+                    return None
+                self._segments.append(segment)
+
+                prev = len(self._segments) - 2
+                if prev >= 0:
+                    await self._segments[prev].close()
+
+            return self._segments[index]
+
+    async def close(self) -> None:
+        for segment in self._segments:
+            await segment.close()
+        if self._sub is not None:
+            await self._sub.close()
+
+    async def __aenter__(self) -> "MediaOutput":
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback) -> None:
+        await self.close()
 
 
 def _normalize_content_type(value: Optional[str]) -> Optional[str]:
