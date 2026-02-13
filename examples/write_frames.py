@@ -68,6 +68,7 @@ async def main() -> None:
             frame.pts = i
             frame.time_base = time_base
             await media.write_frame(frame)
+            await job.send_payment_if_due()
             await asyncio.sleep(frame_interval)
     except LivepeerGatewayError as e:
         print(f"ERROR: {e}")
