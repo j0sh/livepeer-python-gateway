@@ -271,6 +271,7 @@ def start_lv2v(
         signer_url,
         info,
         type="lv2v",
+        model_id=req.model_id,
         capabilities=capabilities,
     )
     p = session.get_payment()
