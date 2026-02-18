@@ -209,7 +209,9 @@ def DiscoverOrchestrators(
     orchestrators: Optional[Sequence[str] | str] = None,
     *,
     signer_url: Optional[str] = None,
+    signer_headers: Optional[dict[str, str]] = None,
     discovery_url: Optional[str] = None,
+    discovery_headers: Optional[dict[str, str]] = None,
 ) -> list[str]:
     """
     Discover orchestrators and return a list of addresses.
@@ -236,15 +238,17 @@ def DiscoverOrchestrators(
 
     if discovery_url:
         discovery_endpoint = _parse_http_url(discovery_url).geturl()
+        request_headers = discovery_headers
     elif signer_url:
         discovery_endpoint = f"{_http_origin(signer_url)}/discover-orchestrators"
+        request_headers = signer_headers
     else:
         _LOG.debug("DiscoverOrchestrators failed: no discovery inputs")
         raise LivepeerGatewayError("DiscoverOrchestrators requires discovery_url or signer_url")
 
     try:
         _LOG.debug("DiscoverOrchestrators running discovery: %s", discovery_endpoint)
-        data = get_json(discovery_endpoint)
+        data = get_json(discovery_endpoint, headers=request_headers)
     except LivepeerGatewayError as e:
         _LOG.debug("DiscoverOrchestrators discovery failed: %s", e)
         raise RemoteSignerError(
@@ -282,7 +286,9 @@ def SelectOrchestrator(
     orchestrators: Optional[Sequence[str] | str] = None,
     *,
     signer_url: Optional[str] = None,
+    signer_headers: Optional[dict[str, str]] = None,
     discovery_url: Optional[str] = None,
+    discovery_headers: Optional[dict[str, str]] = None,
     capabilities: Optional[lp_rpc_pb2.Capabilities] = None,
 ) -> Tuple[str, lp_rpc_pb2.OrchestratorInfo]:
     """
@@ -295,7 +301,9 @@ def SelectOrchestrator(
     orch_list = DiscoverOrchestrators(
         orchestrators,
         signer_url=signer_url,
+        signer_headers=signer_headers,
         discovery_url=discovery_url,
+        discovery_headers=discovery_headers,
     )
 
     if not orch_list:
@@ -311,6 +319,7 @@ def SelectOrchestrator(
                 get_orch_info,
                 url,
                 signer_url=signer_url,
+                signer_headers=signer_headers,
                 capabilities=capabilities,
             ): url
             for url in candidates

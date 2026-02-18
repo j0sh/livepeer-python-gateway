@@ -23,7 +23,11 @@ from .trickle_subscriber import TrickleSubscriber
 _LOG = logging.getLogger(__name__)
 
 
-def _parse_token(token: str) -> dict[str, Optional[str]]:
+def _is_str_dict(v: object) -> bool:
+    return isinstance(v, dict) and all(isinstance(k, str) and isinstance(val, str) for k, val in v.items())
+
+
+def _parse_token(token: str) -> dict[str, Any]:
     try:
         decoded = base64.b64decode(token, validate=True)
     except (binascii.Error, ValueError) as e:
@@ -44,9 +48,18 @@ def _parse_token(token: str) -> dict[str, Optional[str]]:
     if discovery is not None and not isinstance(discovery, str):
         raise LivepeerGatewayError("Invalid token: discovery must be a string")
 
+    signer_headers = payload.get("signer_headers")
+    discovery_headers = payload.get("discovery_headers")
+    if signer_headers is not None and not _is_str_dict(signer_headers):
+        raise LivepeerGatewayError("Invalid token: signer_headers must be a {string: string} object")
+    if discovery_headers is not None and not _is_str_dict(discovery_headers):
+        raise LivepeerGatewayError("Invalid token: discovery_headers must be a {string: string} object")
+
     return {
         "signer": signer,
         "discovery": discovery,
+        "signer_headers": signer_headers,
+        "discovery_headers": discovery_headers,
     }
 
 
@@ -274,7 +287,9 @@ def start_lv2v(
     *,
     token: Optional[str] = None,
     signer_url: Optional[str] = None,
+    signer_headers: Optional[dict[str, str]] = None,
     discovery_url: Optional[str] = None,
+    discovery_headers: Optional[dict[str, str]] = None,
 ) -> LiveVideoToVideo:
     """
     Start a live video-to-video job.
@@ -287,9 +302,8 @@ def start_lv2v(
     Otherwise a warning is logged and payments can be started later
     via ``job.start_payment_sender()``.
 
-    Optional ``token`` can be provided as a base64-encoded JSON object
-    with ``signer`` and ``discovery`` fields. Explicit ``signer_url`` and
-    ``discovery_url`` arguments take precedence over token values.
+    Optional ``token`` can be provided as a base64-encoded JSON object.
+    Explicit keyword arguments taken precedence over token values.
 
     Discovery precedence (highest -> lowest):
     1) explicit ``orch_url`` list
@@ -301,13 +315,19 @@ def start_lv2v(
         raise LivepeerGatewayError("start_lv2v requires model_id")
 
     resolved_signer_url = signer_url
+    resolved_signer_headers = signer_headers
     resolved_discovery_url = discovery_url
+    resolved_discovery_headers = discovery_headers
     if token is not None:
         token_data = _parse_token(token)
         if resolved_signer_url is None:
             resolved_signer_url = token_data.get("signer")
+        if resolved_signer_headers is None:
+            resolved_signer_headers = token_data.get("signer_headers")
         if resolved_discovery_url is None:
             resolved_discovery_url = token_data.get("discovery")
+        if resolved_discovery_headers is None:
+            resolved_discovery_headers = token_data.get("discovery_headers")
 
     capabilities = build_capabilities(CapabilityId.LIVE_VIDEO_TO_VIDEO, req.model_id)
     # SelectOrchestrator uses the first non-nil value for discovery in this order:
@@ -315,13 +335,16 @@ def start_lv2v(
     _, info = SelectOrchestrator(
         orch_url,
         signer_url=resolved_signer_url,
+        signer_headers=resolved_signer_headers,
         discovery_url=resolved_discovery_url,
+        discovery_headers=resolved_discovery_headers,
         capabilities=capabilities,
     )
 
     session = PaymentSession(
         resolved_signer_url,
         info,
+        signer_headers=resolved_signer_headers,
         type="lv2v",
         capabilities=capabilities,
     )

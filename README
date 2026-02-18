@@ -53,7 +53,9 @@ from livepeer_gateway.lv2v import StartJobRequest, start_lv2v
 
 payload = {
     "signer": "https://signer.example.com",
+    "signer_headers": {"Authorization": "Bearer abcdef"},
     "discovery": "https://discovery.example.com",
+    "discovery_headers": {"Authorization": "Bearer qwerty"},
 }
 token = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("utf-8")
 
@@ -64,3 +66,16 @@ job = start_lv2v(
     # signer_url="https://override-signer.example.com",  # explicit args take precedence
 )
 ```
+
+Token schema (base64-encoded JSON object)
+
+| Field | Type | Description |
+|---|---|---|
+| `signer` | `string` (optional) | Signer base URL |
+| `signer_headers` | `{"key": "value"}` (optional) | Extra HTTP headers sent to all signer endpoints |
+| `discovery` | `string` (optional) | Discovery endpoint URL |
+| `discovery_headers` | `{"key": "value"}` (optional) | Extra HTTP headers sent to the discovery endpoint |
+
+Explicit keyword arguments in a function or method always take precedence over token values.
+
+`signer_headers` are sent with requests to the signer service. `discovery_headers` are only used when an explicit `discovery_url` is provided (and not when using the signer service as a discovery fallback).

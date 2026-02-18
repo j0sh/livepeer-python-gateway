@@ -16,7 +16,7 @@ import grpc
 from . import lp_rpc_pb2
 from . import lp_rpc_pb2_grpc
 from .errors import LivepeerGatewayError
-from .remote_signer import get_orch_info_sig
+from .remote_signer import _freeze_headers, get_orch_info_sig
 
 _LOG = logging.getLogger(__name__)
 
@@ -77,6 +77,7 @@ def get_orch_info(
     orch_url: str,
     *,
     signer_url: Optional[str] = None,
+    signer_headers: Optional[dict[str, str]] = None,
     capabilities: Optional[lp_rpc_pb2.Capabilities] = None,
 ) -> lp_rpc_pb2.OrchestratorInfo:
     """
@@ -94,7 +95,7 @@ def get_orch_info(
         "set" if capabilities is not None else "none",
     )
     try:
-        signer = get_orch_info_sig(signer_url)
+        signer = get_orch_info_sig(signer_url, _freeze_headers(signer_headers))
     except Exception as e:
         # Ensure caller sees a clean library error (no raw traceback).
         raise OrchestratorRpcError(

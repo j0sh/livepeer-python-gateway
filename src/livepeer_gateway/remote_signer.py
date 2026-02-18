@@ -44,6 +44,15 @@ class RemoteSignerError(LivepeerGatewayError):
 
 _HEX_RE = re.compile(r"^(0x)?[0-9a-fA-F]*$")
 
+
+def _freeze_headers(
+    headers: Optional[dict[str, str]],
+) -> Optional[frozenset[tuple[str, str]]]:
+    """Convert a headers dict to a frozenset for use with @lru_cache."""
+    if headers is None:
+        return None
+    return frozenset(headers.items())
+
 def _hex_to_bytes(s: str, *, expected_len: Optional[int] = None) -> bytes:
     s = s.strip()
     if not _HEX_RE.match(s):
@@ -60,10 +69,14 @@ def _hex_to_bytes(s: str, *, expected_len: Optional[int] = None) -> bytes:
 
 
 @lru_cache(maxsize=None)
-def get_orch_info_sig(signer_url: str) -> SignerMaterial:
+def get_orch_info_sig(
+    signer_url: str,
+    # frozenset instead of dict because @lru_cache requires hashable arguments.
+    _signer_headers: Optional[frozenset[tuple[str, str]]] = None,
+) -> SignerMaterial:
     """
-    Fetch signer material exactly once per signer_url for the lifetime of the process.
-    Subsequent calls return cached data.
+    Fetch signer material exactly once per (signer_url, headers) combination
+    for the lifetime of the process. Subsequent calls return cached data.
     """
     from .orchestrator import _extract_error_message, _http_origin, post_json
 
@@ -74,10 +87,11 @@ def get_orch_info_sig(signer_url: str) -> SignerMaterial:
     # Accept either a base URL or a full URL that includes /sign-orchestrator-info.
     # Normalize to an https:// origin and append the expected path.
     signer_url = f"{_http_origin(signer_url)}/sign-orchestrator-info"
+    headers = dict(_signer_headers) if _signer_headers else None
 
     try:
         # Some signers accept/expect POST with an empty JSON object.
-        data = post_json(signer_url, {}, timeout=5.0)
+        data = post_json(signer_url, {}, headers=headers, timeout=5.0)
 
         # Expected response shape (example):
         # {
@@ -144,11 +158,13 @@ class PaymentSession:
         signer_url: Optional[str],
         info: lp_rpc_pb2.OrchestratorInfo,
         *,
+        signer_headers: Optional[dict[str, str]] = None,
         type: str,
         capabilities: Optional[lp_rpc_pb2.Capabilities] = None,
         max_refresh_retries: int = 3,
     ) -> None:
         self._signer_url = signer_url
+        self._signer_headers = signer_headers
         self._info = info
         self._type = type
         self._manifest_id: Optional[str] = None
@@ -199,7 +215,7 @@ class PaymentSession:
             if self._state is not None:
                 payload["state"] = self._state
 
-            data = post_json(url, payload)
+            data = post_json(url, payload, headers=self._signer_headers)
             payment = data.get("payment")
             if not isinstance(payment, str) or not payment:
                 raise PaymentError(
@@ -239,6 +255,7 @@ class PaymentSession:
                 self._info = get_orch_info(
                     self._info.transcoder,
                     signer_url=self._signer_url,
+                    signer_headers=self._signer_headers,
                     capabilities=self._capabilities,
                 )
                 attempts += 1
