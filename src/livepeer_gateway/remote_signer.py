@@ -12,7 +12,9 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from . import lp_rpc_pb2
+from .capabilities import CapabilityId
 from .errors import LivepeerGatewayError, PaymentError, SignerRefreshRequired, SkipPaymentCycle
+
 _LOG = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
@@ -152,6 +154,52 @@ def get_orch_info_sig(
     return SignerMaterial(address=address, sig=sig)
 
 
+def _select_price_info(
+    info: lp_rpc_pb2.OrchestratorInfo,
+    *,
+    typ: str,
+    model_id: Optional[str],
+) -> lp_rpc_pb2.PriceInfo:
+    """
+    Choose the price info to use for a payment request.
+
+    For LV2V, prefer a capability-scoped price that matches the requested model ID.
+    Fallback to the general price_info only if no matching capability price exists.
+    """
+    if typ == "lv2v":
+        if not model_id:
+            raise PaymentError("Payment requires model_id for LV2V pricing.")
+
+        # Capability 35 corresponds to Live video to video.
+        for pi in info.capabilities_prices:
+            if (
+                pi.capability == CapabilityId.LIVE_VIDEO_TO_VIDEO
+                and pi.pricePerUnit > 0
+                and pi.pixelsPerUnit > 0
+                and pi.constraint == model_id
+            ):
+                return pi
+
+        # No matching capability price; fall back to general price if valid.
+        if info.HasField("price_info") and info.price_info.pricePerUnit > 0 and info.price_info.pixelsPerUnit > 0:
+            return info.price_info
+
+        raise PaymentError(
+            f"No capability price found for LV2V model_id={model_id}; "
+            "orchestrator did not return usable pricing."
+        )
+
+    # Non-LV2V: use general price_info first, otherwise any valid capability price.
+    if info.HasField("price_info") and info.price_info.pricePerUnit > 0 and info.price_info.pixelsPerUnit > 0:
+        return info.price_info
+
+    for pi in info.capabilities_prices:
+        if pi.pricePerUnit > 0 and pi.pixelsPerUnit > 0:
+            return pi
+
+    raise PaymentError("Orchestrator did not return usable pricing information.")
+
+
 class PaymentSession:
     def __init__(
         self,
@@ -160,6 +208,7 @@ class PaymentSession:
         *,
         signer_headers: Optional[dict[str, str]] = None,
         type: str,
+        model_id: Optional[str] = None,
         capabilities: Optional[lp_rpc_pb2.Capabilities] = None,
         max_refresh_retries: int = 3,
     ) -> None:
@@ -167,6 +216,7 @@ class PaymentSession:
         self._signer_headers = signer_headers
         self._info = info
         self._type = type
+        self._model_id = model_id
         self._manifest_id: Optional[str] = None
         self._capabilities = capabilities
         self._max_refresh_retries = max(0, int(max_refresh_retries))
@@ -204,12 +254,53 @@ class PaymentSession:
             base = _http_origin(self._signer_url)
             url = f"{base}/generate-live-payment"
 
-            pb = self._info.SerializeToString()
+            # Select capability-scoped pricing when model_id is available
+            price_info = None
+            if self._model_id:
+                try:
+                    price_info = _select_price_info(
+                        self._info,
+                        typ=self._type,
+                        model_id=self._model_id,
+                    )
+                except PaymentError:
+                    _LOG.debug(
+                        "No capability-scoped pricing for model_id=%s; "
+                        "proceeding without priceInfo",
+                        self._model_id,
+                    )
+
+            # Build the OrchestratorInfo protobuf to send to the signer.
+            # If we found capability-scoped pricing, set it on the protobuf
+            # so the signer uses the correct price for ticket generation.
+            info_for_payment = lp_rpc_pb2.OrchestratorInfo()
+            info_for_payment.CopyFrom(self._info)
+            if price_info is not None:
+                info_for_payment.price_info.pricePerUnit = price_info.pricePerUnit
+                info_for_payment.price_info.pixelsPerUnit = price_info.pixelsPerUnit
+                info_for_payment.price_info.capability = price_info.capability
+                info_for_payment.price_info.constraint = price_info.constraint
+
+            pb = info_for_payment.SerializeToString()
             orch_b64 = base64.b64encode(pb).decode("ascii")
             payload: dict[str, Any] = {
                 "orchestrator": orch_b64,
                 "type": self._type,
             }
+
+            # Include priceInfo when capability-scoped pricing is available
+            if price_info is not None:
+                capability = price_info.capability
+                if self._type == "lv2v" and capability == 0:
+                    capability = int(CapabilityId.LIVE_VIDEO_TO_VIDEO)
+                constraint = price_info.constraint or (self._model_id or "")
+                payload["priceInfo"] = {
+                    "pricePerUnit": price_info.pricePerUnit,
+                    "pixelsPerUnit": price_info.pixelsPerUnit,
+                    "capability": capability,
+                    "constraint": constraint,
+                }
+
             if self._manifest_id is not None:
                 payload["ManifestID"] = self._manifest_id
             if self._state is not None:

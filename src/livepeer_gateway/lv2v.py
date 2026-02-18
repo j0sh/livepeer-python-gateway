@@ -346,6 +346,7 @@ def start_lv2v(
         info,
         signer_headers=resolved_signer_headers,
         type="lv2v",
+        model_id=req.model_id,
         capabilities=capabilities,
     )
     p = session.get_payment()
