@@ -43,3 +43,24 @@ Subscribe to a LiveVideoToVideo trickle events channel
 ```
 uv run examples/subscribe_events.py localhost:8935
 ```
+
+Start a LiveVideoToVideo job using a token (base64 JSON)
+```python
+import base64
+import json
+
+from livepeer_gateway.lv2v import StartJobRequest, start_lv2v
+
+payload = {
+    "signer": "https://signer.example.com",
+    "discovery": "https://discovery.example.com",
+}
+token = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("utf-8")
+
+job = start_lv2v(
+    orch_url=None,
+    req=StartJobRequest(model_id="noop"),
+    token=token,
+    # signer_url="https://override-signer.example.com",  # explicit args take precedence
+)
+```
