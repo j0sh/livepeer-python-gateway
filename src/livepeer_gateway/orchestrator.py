@@ -229,7 +229,7 @@ def _append_caps(url: str, capabilities: Optional[lp_rpc_pb2.Capabilities]) -> s
     return urlunparse(parsed._replace(query=query))
 
 
-def DiscoverOrchestrators(
+def discover_orchestrators(
     orchestrators: Optional[Sequence[str] | str] = None,
     *,
     signer_url: Optional[str] = None,
@@ -255,7 +255,7 @@ def DiscoverOrchestrators(
                 orch_list = list(orchestrators)
             except TypeError as e:
                 raise LivepeerGatewayError(
-                    "DiscoverOrchestrators requires a list of orchestrator URLs or a comma-delimited string"
+                    "discover_orchestrators requires a list of orchestrator URLs or a comma-delimited string"
                 ) from e
         orch_list = [orch.strip() for orch in orch_list if isinstance(orch, str) and orch.strip()]
         if orch_list:
@@ -268,17 +268,17 @@ def DiscoverOrchestrators(
         discovery_endpoint = f"{_http_origin(signer_url)}/discover-orchestrators"
         request_headers = signer_headers
     else:
-        _LOG.debug("DiscoverOrchestrators failed: no discovery inputs")
-        raise LivepeerGatewayError("DiscoverOrchestrators requires discovery_url or signer_url")
+        _LOG.debug("discover_orchestrators failed: no discovery inputs")
+        raise LivepeerGatewayError("discover_orchestrators requires discovery_url or signer_url")
 
     if capabilities is not None:
         discovery_endpoint = _append_caps(discovery_endpoint, capabilities)
 
     try:
-        _LOG.debug("DiscoverOrchestrators running discovery: %s", discovery_endpoint)
+        _LOG.debug("discover_orchestrators running discovery: %s", discovery_endpoint)
         data = get_json(discovery_endpoint, headers=request_headers)
     except LivepeerGatewayError as e:
-        _LOG.debug("DiscoverOrchestrators discovery failed: %s", e)
+        _LOG.debug("discover_orchestrators discovery failed: %s", e)
         raise RemoteSignerError(
             discovery_endpoint,
             str(e),
@@ -287,7 +287,7 @@ def DiscoverOrchestrators(
 
     if not isinstance(data, list):
         _LOG.debug(
-            "DiscoverOrchestrators discovery response not list: type=%s",
+            "discover_orchestrators discovery response not list: type=%s",
             type(data).__name__,
         )
         raise RemoteSignerError(
@@ -296,7 +296,7 @@ def DiscoverOrchestrators(
             cause=None,
         ) from None
 
-    _LOG.debug("DiscoverOrchestrators discovery response: %s", data)
+    _LOG.debug("discover_orchestrators discovery response: %s", data)
 
     orch_list = []
     for item in data:
@@ -305,7 +305,7 @@ def DiscoverOrchestrators(
         address = item.get("address")
         if isinstance(address, str) and address.strip():
             orch_list.append(address.strip())
-    _LOG.debug("DiscoverOrchestrators discovered %d orchestrators", len(orch_list))
+    _LOG.debug("discover_orchestrators discovered %d orchestrators", len(orch_list))
 
     return orch_list
 
@@ -326,7 +326,7 @@ def SelectOrchestrator(
     - discovery_url, if provided
     - otherwise {signer_url}/discover-orchestrators
     """
-    orch_list = DiscoverOrchestrators(
+    orch_list = discover_orchestrators(
         orchestrators,
         signer_url=signer_url,
         signer_headers=signer_headers,

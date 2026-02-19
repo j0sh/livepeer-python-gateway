@@ -8,7 +8,7 @@ from livepeer_gateway.capabilities import (
     get_per_capability_map,
 )
 from livepeer_gateway import get_orch_info
-from livepeer_gateway.orchestrator import DiscoverOrchestrators, LivepeerGatewayError
+from livepeer_gateway.orchestrator import LivepeerGatewayError, discover_orchestrators
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
@@ -58,7 +58,7 @@ def main() -> None:
         logging.basicConfig(level=logging.DEBUG)
 
     try:
-        orch_list = DiscoverOrchestrators(
+        orch_list = discover_orchestrators(
             args.orchestrators,
             signer_url=args.signer,
             discovery_url=args.discovery,

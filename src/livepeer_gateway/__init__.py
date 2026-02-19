@@ -7,7 +7,7 @@ from .media_decode import AudioDecodedMediaFrame, DecodedMediaFrame, VideoDecode
 from .media_output import MediaOutput
 from .lv2v import LiveVideoToVideo, StartJobRequest, start_lv2v
 from .orch_info import get_orch_info
-from .orchestrator import DiscoverOrchestrators, SelectOrchestrator
+from .orchestrator import SelectOrchestrator, discover_orchestrators
 from .remote_signer import PaymentSession
 from .trickle_publisher import TricklePublisher
 from .segment_reader import SegmentReader
@@ -17,7 +17,7 @@ __all__ = [
     "Control",
     "CapabilityId",
     "build_capabilities",
-    "DiscoverOrchestrators",
+    "discover_orchestrators",
     "get_orch_info",
     "LiveVideoToVideo",
     "LivepeerGatewayError",
