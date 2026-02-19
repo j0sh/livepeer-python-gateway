@@ -258,6 +258,7 @@ async def _payment_sender(
     Payment errors are logged but do not stop the loop.
     """
     last_payment_at = 0.0
+    interval_s = 5.0
     async with TrickleSubscriber(
         subscribe_url,
         connection_close=True,
@@ -270,7 +271,12 @@ async def _payment_sender(
             seq = segment.seq()
             try:
                 now = time.monotonic()
-                if now - last_payment_at >= 5.0:
+                if now - last_payment_at >= interval_s:
+                    # Skip the network call entirely when local balance prediction says no tickets needed.
+                    # This replicates the signer's fee calculation client-side to avoid 482 round-trips.
+                    if session.balance_sufficient():
+                        last_payment_at = now
+                        continue
                     _LOG.debug("Payment sender: sending payment for seq=%s", seq)
                     # TODO make async-native
                     await asyncio.to_thread(session.send_payment)
@@ -281,6 +287,7 @@ async def _payment_sender(
                     seq,
                     e,
                 )
+                last_payment_at = now
             except Exception:
                 _LOG.exception("Payment sender: failed for seq=%s", seq)
             finally:

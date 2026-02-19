@@ -6,13 +6,15 @@ import logging
 import re
 import ssl
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from fractions import Fraction
 from functools import lru_cache
 from typing import Any, Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from . import lp_rpc_pb2
-from .errors import LivepeerGatewayError, PaymentError, SignerRefreshRequired, SkipPaymentCycle
+from .errors import LivepeerGatewayError, PaymentError, SignerRefreshRequired
 _LOG = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
@@ -176,6 +178,60 @@ class PaymentSession:
         if not isinstance(manifest_id, str) or not manifest_id.strip():
             raise PaymentError("manifest_id must be a non-empty string")
         self._manifest_id = manifest_id.strip()
+
+    # Matches go-livepeer server/live_payment_processor.go defaultSegInfo (1280×720×30fps)
+    _LV2V_PIXELS_PER_SEC: int = 1280 * 720 * 30
+
+    def balance_sufficient(self) -> bool:
+        """
+        Returns True if the locally-predicted balance is sufficient to cover the
+        next payment interval, meaning the signer would return 482 (no tickets).
+
+        Replicates the fee calculation in go-livepeer remote_signer.go using the
+        signed state blob returned by the signer. Only applies to lv2v sessions.
+        """
+        if self._type != "lv2v" or self._state is None:
+            return False
+        try:
+            state_bytes = base64.b64decode(self._state.get("State", ""))
+            decoded = json.loads(state_bytes)
+        except Exception:
+            return False
+
+        try:
+            balance = float(Fraction(decoded["Balance"]))
+        except (KeyError, ValueError, ZeroDivisionError):
+            return False
+
+        price_per_unit = decoded.get("InitialPricePerUnit", 0)
+        pixels_per_unit = decoded.get("InitialPixelsPerUnit", 1) or 1
+        last_update_str = decoded.get("LastUpdate", "")
+        if not price_per_unit or not last_update_str:
+            return False
+
+        try:
+            # Go marshals time.Time as RFC3339Nano; truncate to microseconds for fromisoformat
+            ts = re.sub(r"(\.\d{6})\d*", r"\1", last_update_str.replace("Z", "+00:00"))
+            last_update = datetime.fromisoformat(ts)
+            elapsed_s = (datetime.now(timezone.utc) - last_update).total_seconds()
+        except ValueError:
+            return False
+
+        # Replicate go-livepeer fee: pixels_since_last_update * price_per_unit / pixels_per_unit
+        accrued_fee = self._LV2V_PIXELS_PER_SEC * elapsed_s * price_per_unit / pixels_per_unit
+
+        # Replicate go-livepeer EV floor: faceValue * winProb / 2^256
+        ev = 0.0
+        try:
+            tp = self._info.ticket_params
+            face_value = int.from_bytes(tp.face_value, "big")
+            win_prob_int = int.from_bytes(tp.win_prob, "big")
+            ev = face_value * win_prob_int / (2**256)
+        except Exception:
+            pass
+
+        # Signer returns 482 (no tickets) when balance >= max(accrued_fee, ev)
+        return balance >= max(accrued_fee, ev)
 
     def get_payment(self) -> GetPaymentResponse:
         """
