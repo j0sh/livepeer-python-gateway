@@ -1,7 +1,9 @@
 import argparse
 import logging
 
-from livepeer_gateway.orchestrator import LivepeerGatewayError, SelectOrchestrator
+from livepeer_gateway.capabilities import CapabilityId, build_capabilities
+from livepeer_gateway.errors import LivepeerGatewayError, NoOrchestratorAvailableError
+from livepeer_gateway.selection import orchestrator_selector
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
@@ -34,6 +36,11 @@ def _parse_args() -> argparse.Namespace:
         help="Explicit discovery endpoint URL (overrides signer discovery).",
     )
     p.add_argument(
+        "--model",
+        default=None,
+        help="Pipeline model ID for capability filtering. If omitted, no capability filter is applied.",
+    )
+    p.add_argument(
         "--signer",
         default=None,
         help="Remote signer base URL (no path). Can be combined with list/discovery.",
@@ -51,12 +58,16 @@ def main() -> None:
     if args.debug:
         logging.basicConfig(level=logging.DEBUG)
 
+    capabilities = build_capabilities(CapabilityId.LIVE_VIDEO_TO_VIDEO, args.model) if args.model else None
+
     try:
-        orch_url, info = SelectOrchestrator(
+        cursor = orchestrator_selector(
             args.orchestrators or None,
             signer_url=args.signer,
             discovery_url=args.discovery,
+            capabilities=capabilities,
         )
+        orch_url, info = cursor.next()
         if args.orchestrators:
             mode = "orchestrator list"
         elif args.discovery:
@@ -68,9 +79,15 @@ def main() -> None:
 
         print("=== Selected Orchestrator ===")
         print("Mode:", mode)
+        if args.model:
+            print("Model:", args.model)
         print("Orchestrator:", orch_url)
         print("Transcoder URI:", info.transcoder)
         print("ETH Address:", info.address.hex())
+    except NoOrchestratorAvailableError as e:
+        print(f"ERROR: {e}")
+        for r in e.rejections:
+            print(f"  rejected {r.url}: {r.reason}")
     except LivepeerGatewayError as e:
         print(f"ERROR: {e}")
 

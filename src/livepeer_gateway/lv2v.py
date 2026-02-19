@@ -12,11 +12,17 @@ from typing import Any, Optional, Sequence
 from . import lp_rpc_pb2
 from .capabilities import CapabilityId, build_capabilities
 from .control import Control
-from .errors import LivepeerGatewayError, SkipPaymentCycle
+from .errors import (
+    LivepeerGatewayError,
+    NoOrchestratorAvailableError,
+    OrchestratorRejection,
+    SkipPaymentCycle,
+)
 from .events import Events
 from .media_output import LagPolicy, MediaOutput
 from .media_publish import MediaPublish, MediaPublishConfig
-from .orchestrator import SelectOrchestrator, _http_origin, post_json
+from .orchestrator import _http_origin, post_json
+from .selection import orchestrator_selector
 from .remote_signer import PaymentSession
 from .trickle_subscriber import TrickleSubscriber
 
@@ -330,9 +336,9 @@ def start_lv2v(
             resolved_discovery_headers = token_data.get("discovery_headers")
 
     capabilities = build_capabilities(CapabilityId.LIVE_VIDEO_TO_VIDEO, req.model_id)
-    # SelectOrchestrator uses the first non-nil value for discovery in this order:
+    # Orchestrator discovery precedence:
     # orch_url -> discovery_url -> signer_url
-    _, info = SelectOrchestrator(
+    cursor = orchestrator_selector(
         orch_url,
         signer_url=resolved_signer_url,
         signer_headers=resolved_signer_headers,
@@ -341,29 +347,52 @@ def start_lv2v(
         capabilities=capabilities,
     )
 
-    session = PaymentSession(
-        resolved_signer_url,
-        info,
-        signer_headers=resolved_signer_headers,
-        type="lv2v",
-        capabilities=capabilities,
-    )
-    p = session.get_payment()
-    headers: dict[str, str] = {
-        "Livepeer-Payment": p.payment,
-        "Livepeer-Segment": p.seg_creds,
-    }
+    start_rejections: list[OrchestratorRejection] = []
+    while True:
+        try:
+            selected_url, info = cursor.next()
+        except NoOrchestratorAvailableError as e:
+            # No more successful OrchestratorInfo responses remain.
+            # Surface a single aggregated "all orchestrators failed" error.
+            all_rejections = list(e.rejections) + start_rejections
+            if all_rejections:
+                raise NoOrchestratorAvailableError(
+                    f"All orchestrators failed ({len(all_rejections)} tried)",
+                    rejections=all_rejections,
+                ) from None
+            raise
 
-    base = _http_origin(info.transcoder)
-    url = f"{base}/live-video-to-video"
-    data = post_json(url, req.to_json(), headers=headers)
-    job = LiveVideoToVideo.from_json(
-        data,
-        orchestrator_info=info,
-        payment_session=session,
-    )
-    if not job.manifest_id:
-        raise LivepeerGatewayError("LiveVideoToVideo response missing manifest_id")
-    session.set_manifest_id(job.manifest_id)
-    job.start_payment_sender()
-    return job
+        try:
+            session = PaymentSession(
+                resolved_signer_url,
+                info,
+                signer_headers=resolved_signer_headers,
+                type="lv2v",
+                capabilities=capabilities,
+            )
+            p = session.get_payment()
+            headers: dict[str, str] = {
+                "Livepeer-Payment": p.payment,
+                "Livepeer-Segment": p.seg_creds,
+            }
+
+            base = _http_origin(info.transcoder)
+            url = f"{base}/live-video-to-video"
+            data = post_json(url, req.to_json(), headers=headers)
+            job = LiveVideoToVideo.from_json(
+                data,
+                orchestrator_info=info,
+                payment_session=session,
+            )
+            if not job.manifest_id:
+                raise LivepeerGatewayError("LiveVideoToVideo response missing manifest_id")
+            session.set_manifest_id(job.manifest_id)
+            job.start_payment_sender()
+            return job
+        except LivepeerGatewayError as e:
+            _LOG.debug(
+                "start_lv2v candidate failed, trying fallback if available: %s (%s)",
+                selected_url,
+                str(e),
+            )
+            start_rejections.append(OrchestratorRejection(url=selected_url, reason=str(e)))

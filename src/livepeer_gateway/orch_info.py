@@ -89,7 +89,7 @@ def get_orch_info(
     Always uses secure channel (TLS) with certificate verification disabled.
     """
     _LOG.debug(
-        "Fetching orchestrator info orch=%s",
+        "Fetching orchestrator info orch=%s signer=%s capabilities=%s",
         orch_url,
         signer_url or "",
         "set" if capabilities is not None else "none",

@@ -3,9 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import ssl
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
-from typing import Any, Optional, Sequence, Tuple
+from typing import Any, Optional, Sequence
 from urllib.parse import ParseResult, parse_qsl, quote, urlencode, urlparse, urlunparse
 from urllib.error import URLError, HTTPError
 from urllib.request import Request, urlopen
@@ -15,11 +14,9 @@ from .capabilities import capabilities_to_query
 
 from .errors import (
     LivepeerGatewayError,
-    NoOrchestratorAvailableError,
     SignerRefreshRequired,
     SkipPaymentCycle,
 )
-from .orch_info import get_orch_info
 from .remote_signer import RemoteSignerError
 
 _LOG = logging.getLogger(__name__)
@@ -309,62 +306,5 @@ def discover_orchestrators(
 
     return orch_list
 
-
-def SelectOrchestrator(
-    orchestrators: Optional[Sequence[str] | str] = None,
-    *,
-    signer_url: Optional[str] = None,
-    signer_headers: Optional[dict[str, str]] = None,
-    discovery_url: Optional[str] = None,
-    discovery_headers: Optional[dict[str, str]] = None,
-    capabilities: Optional[lp_rpc_pb2.Capabilities] = None,
-) -> Tuple[str, lp_rpc_pb2.OrchestratorInfo]:
-    """
-    Select an orchestrator by trying up to ~5 candidates in parallel.
-
-    If orchestrators is empty/None, a discovery endpoint is used:
-    - discovery_url, if provided
-    - otherwise {signer_url}/discover-orchestrators
-    """
-    orch_list = discover_orchestrators(
-        orchestrators,
-        signer_url=signer_url,
-        signer_headers=signer_headers,
-        discovery_url=discovery_url,
-        discovery_headers=discovery_headers,
-        capabilities=capabilities,
-    )
-
-    if not orch_list:
-        _LOG.debug("SelectOrchestrator failed: empty orchestrator list")
-        raise NoOrchestratorAvailableError("No orchestrators available to select")
-
-    candidates = orch_list[:5]
-
-    _LOG.debug("SelectOrchestrator trying candidates: %s", candidates)
-    with ThreadPoolExecutor(max_workers=len(candidates)) as executor:
-        futures = {
-            executor.submit(
-                get_orch_info,
-                url,
-                signer_url=signer_url,
-                signer_headers=signer_headers,
-                capabilities=capabilities,
-            ): url
-            for url in candidates
-        }
-
-        for future in as_completed(futures):
-            url = futures[future]
-            try:
-                info = future.result()
-            except LivepeerGatewayError as e:
-                _LOG.debug("SelectOrchestrator candidate failed: %s (%s)", url, e)
-                continue
-            _LOG.debug("SelectOrchestrator selected: %s", url)
-            return url, info
-
-    _LOG.debug("SelectOrchestrator failed: all candidates errored")
-    raise NoOrchestratorAvailableError("All orchestrators failed")
 
 
