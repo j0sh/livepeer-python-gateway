@@ -137,3 +137,58 @@ def build_capabilities(
         caps.constraints.PerCapability[cap_id].models[constraint]
     return caps
 
+
+def capability_pipeline_id(cap_id: int) -> Optional[str]:
+    """
+    Convert a capability ID to a discovery pipeline ID.
+
+    Example:
+        LIVE_VIDEO_TO_VIDEO -> live-video-to-video
+    """
+    try:
+        enum_name = CapabilityId(cap_id).name
+    except ValueError:
+        return None
+    return enum_name.lower().replace("_", "-")
+
+
+def capabilities_to_query(caps: Optional[lp_rpc_pb2.Capabilities]) -> list[str]:
+    """
+    Build discovery query values in `pipeline-id/model` form.
+
+    Models are taken as-is from the protobuf constraints map keys.
+    """
+    if caps is None:
+        return []
+
+    constraints = getattr(caps, "constraints", None)
+    if constraints is None:
+        return []
+
+    per_capability = getattr(constraints, "PerCapability", None)
+    if per_capability is None:
+        return []
+
+    query_values: list[str] = []
+    seen: set[str] = set()
+    for cap_id in sorted(per_capability.keys()):
+        pipeline_id = capability_pipeline_id(int(cap_id))
+        if not pipeline_id:
+            continue
+
+        cap_constraint = per_capability[cap_id]
+        models = getattr(cap_constraint, "models", None)
+        if models is None:
+            continue
+
+        for model in sorted(models.keys()):
+            if not isinstance(model, str) or not model:
+                continue
+            value = f"{pipeline_id}/{model}"
+            if value in seen:
+                continue
+            seen.add(value)
+            query_values.append(value)
+
+    return query_values
+

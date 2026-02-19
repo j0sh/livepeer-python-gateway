@@ -6,11 +6,12 @@ import ssl
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
 from typing import Any, Optional, Sequence, Tuple
-from urllib.parse import urlparse
+from urllib.parse import ParseResult, parse_qsl, quote, urlencode, urlparse, urlunparse
 from urllib.error import URLError, HTTPError
 from urllib.request import Request, urlopen
 
 from . import lp_rpc_pb2
+from .capabilities import capabilities_to_query
 
 from .errors import (
     LivepeerGatewayError,
@@ -205,6 +206,29 @@ def _http_origin(url: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
+def _append_caps(url: str, capabilities: Optional[lp_rpc_pb2.Capabilities]) -> str:
+    """
+    Append repeated `caps` query parameters to a URL.
+
+    Existing query params are preserved. Capability values keep `/` unescaped.
+
+    Example output:
+        https://example.com/discover-orchestrators?x=1&caps=live-video-to-video/streamdiffusion-sdxl-v2v&caps=text-to-image/sdxl
+    """
+    if capabilities is None:
+        return url
+
+    caps = capabilities_to_query(capabilities)
+    if not caps:
+        return url
+
+    parsed = urlparse(url)
+    query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
+    query_pairs.extend(("caps", cap) for cap in caps)
+    query = urlencode(query_pairs, doseq=True, quote_via=quote, safe="/")
+    return urlunparse(parsed._replace(query=query))
+
+
 def DiscoverOrchestrators(
     orchestrators: Optional[Sequence[str] | str] = None,
     *,
@@ -212,6 +236,7 @@ def DiscoverOrchestrators(
     signer_headers: Optional[dict[str, str]] = None,
     discovery_url: Optional[str] = None,
     discovery_headers: Optional[dict[str, str]] = None,
+    capabilities: Optional[lp_rpc_pb2.Capabilities] = None,
 ) -> list[str]:
     """
     Discover orchestrators and return a list of addresses.
@@ -245,6 +270,9 @@ def DiscoverOrchestrators(
     else:
         _LOG.debug("DiscoverOrchestrators failed: no discovery inputs")
         raise LivepeerGatewayError("DiscoverOrchestrators requires discovery_url or signer_url")
+
+    if capabilities is not None:
+        discovery_endpoint = _append_caps(discovery_endpoint, capabilities)
 
     try:
         _LOG.debug("DiscoverOrchestrators running discovery: %s", discovery_endpoint)
@@ -304,6 +332,7 @@ def SelectOrchestrator(
         signer_headers=signer_headers,
         discovery_url=discovery_url,
         discovery_headers=discovery_headers,
+        capabilities=capabilities,
     )
 
     if not orch_list:
