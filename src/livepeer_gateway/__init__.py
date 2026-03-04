@@ -1,4 +1,5 @@
 from .capabilities import CapabilityId, build_capabilities
+from .channel_reader import ChannelReader
 from .control import Control, ControlConfig, ControlMode, TimeControl
 from .errors import LivepeerGatewayError, NoOrchestratorAvailableError, PaymentError
 from .events import Events
@@ -33,6 +34,7 @@ __all__ = [
     "MediaOutput",
     "AudioDecodedMediaFrame",
     "DecodedMediaFrame",
+    "ChannelReader",
     "Events",
     "PaymentSession",
     "SelectionCursor",
