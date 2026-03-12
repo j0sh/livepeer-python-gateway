@@ -6,8 +6,8 @@ import logging
 import queue
 import threading
 import sys
+import time
 from contextlib import suppress
-from fractions import Fraction
 
 import av
 
@@ -64,22 +64,29 @@ def _parse_args() -> argparse.Namespace:
         default=DEFAULT_DEVICE,
         help=(
             "Camera device index for avfoundation (default: 0). "
-            'List devices with: ffmpeg -f avfoundation -list_devices true -i ""'
+            'List devices with: ffmpeg -f avfoundation -list_devices true -i "". '
+            "Ignored when --input is used."
         ),
     )
     p.add_argument("--fps", type=float, default=DEFAULT_FPS, help="Frames per second (default: 30).")
     p.add_argument(
         "--video-size",
         default=DEFAULT_VIDEO_SIZE,
-        help=f"Capture size (e.g. '1920x1080'). Default: {DEFAULT_VIDEO_SIZE}.",
+        help=f"Capture size (e.g. '1920x1080'). Default: {DEFAULT_VIDEO_SIZE}. Ignored when --input is used.",
     )
     p.add_argument(
         "--pixel-format",
         default=DEFAULT_PIXEL_FORMAT,
         help=(
             "Capture pixel format for avfoundation. "
-            "Supported formats vary by device; common options: uyvy422, yuyv422, nv12."
+            "Supported formats vary by device; common options: uyvy422, yuyv422, nv12. "
+            "Ignored when --input is used."
         ),
+    )
+    p.add_argument(
+        "--input",
+        default=None,
+        help="Path to a local media file. If omitted, captures from camera.",
     )
     p.add_argument(
         "--output",
@@ -101,9 +108,49 @@ def _capture_frames(
                 for frame in input_.decode(video=0):
                     if stop_event.is_set():
                         break
+                    # Use wall-clock PTS via MediaPublish, not captured PTS
+                    frame.pts = None
                     frame_queue.put(frame)
             except av.BlockingIOError:
                 continue
+    finally:
+        frame_queue.put(_STOP)
+
+
+def _capture_file_frames(
+    input_: av.container.InputContainer,
+    frame_queue: "queue.Queue[object]",
+    stop_event: threading.Event,
+) -> None:
+    prev_pts: int | None = None
+    prev_wall: float | None = None
+    try:
+        print("Running file capture...")
+        for frame in input_.decode(video=0):
+            if stop_event.is_set():
+                break
+
+            if (
+                prev_pts is not None
+                and prev_wall is not None
+                and frame.pts is not None
+                and frame.time_base is not None
+            ):
+                delta_s = float((frame.pts - prev_pts) * frame.time_base)
+                elapsed_s = time.monotonic() - prev_wall
+                sleep_s = max(0.0, delta_s - elapsed_s)
+                if sleep_s > 0:
+                    time.sleep(sleep_s)
+
+            if frame.pts is not None and frame.time_base is not None:
+                prev_pts = frame.pts
+                # Track just before enqueue so next sleep subtracts enqueue/processing cost.
+                prev_wall = time.monotonic()
+            else:
+                prev_pts = None
+                prev_wall = None
+
+            frame_queue.put(frame)
     finally:
         frame_queue.put(_STOP)
 
@@ -146,26 +193,40 @@ async def main() -> None:
             print("subscribe_url:", job.subscribe_url)
         print()
 
-        media = job.start_media(MediaPublishConfig(fps=args.fps))
+        av.logging.set_level(av.logging.ERROR)
+        capture_target = _capture_frames
+        capture_name = "CameraCapture"
+        media_fps = args.fps
+        if args.input:
+            input_ = av.open(args.input)
+            if not input_.streams.video:
+                raise LivepeerGatewayError(f"No video stream found in input file: {args.input}")
+            video_stream = input_.streams.video[0]
+            rate = video_stream.average_rate or video_stream.guessed_rate
+            if rate is not None:
+                media_fps = float(rate)
+            capture_target = _capture_file_frames
+            capture_name = "FileCapture"
+        else:
+            input_ = av.open(
+                args.device,
+                format="avfoundation",
+                container_options={
+                    "framerate": str(args.fps),
+                    "video_size": args.video_size,
+                    "pixel_format": args.pixel_format,
+                },
+            )
+
+        media = job.start_media(MediaPublishConfig(fps=media_fps))
         if args.output:
             output_task = asyncio.create_task(_write_media_output(job, args.output))
 
-        av.logging.set_level(av.logging.ERROR)
-        input_ = av.open(
-            args.device,
-            format="avfoundation",
-            container_options={
-                "framerate": str(args.fps),
-                "video_size": args.video_size,
-                "pixel_format": args.pixel_format,
-            },
-        )
-
         frame_queue: "queue.Queue[object]" = queue.Queue(maxsize=8)
         capture_thread = threading.Thread(
-            target=_capture_frames,
+            target=capture_target,
             args=(input_, frame_queue, stop_event),
-            name="CameraCapture",
+            name=capture_name,
             daemon=True,
         )
         capture_thread.start()
@@ -176,7 +237,6 @@ async def main() -> None:
             if item is _STOP:
                 break
             frame = item
-            frame.pts = None
             await media.write_frame(frame)
     except KeyboardInterrupt:
         print("Recording stopped by user")
