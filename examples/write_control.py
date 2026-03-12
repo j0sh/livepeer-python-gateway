@@ -2,7 +2,6 @@ import argparse
 import asyncio
 import json
 
-from livepeer_gateway.control import ControlConfig, ControlMode
 from livepeer_gateway.errors import LivepeerGatewayError
 from livepeer_gateway.lv2v import StartJobRequest, start_lv2v
 
@@ -35,18 +34,6 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument("--count", type=int, default=1, help="How many times to send the message (default: 1).")
     p.add_argument("--interval", type=float, default=0.2, help="Seconds between messages (default: 0.2).")
-    p.add_argument(
-        "--mode",
-        choices=[ControlMode.MESSAGE.value, ControlMode.TIME.value],
-        default=ControlMode.MESSAGE.value,
-        help="Control channel mode: message or time (default: message).",
-    )
-    p.add_argument(
-        "--segment-interval",
-        type=float,
-        default=10.0,
-        help="Rotation interval in seconds for time mode (default: 10.0).",
-    )
     return p.parse_args()
 
 
@@ -54,15 +41,10 @@ async def main() -> None:
     args = _parse_args()
 
     try:
-        control_config = ControlConfig(
-            mode=ControlMode(args.mode),
-            segment_interval=args.segment_interval,
-        )
         job = start_lv2v(
             args.orchestrator,
             StartJobRequest(model_id=args.model),
             signer_url=args.signer,
-            control_config=control_config,
         )
 
         print("=== LiveVideoToVideo ===")
