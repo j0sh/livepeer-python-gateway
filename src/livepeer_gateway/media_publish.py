@@ -9,7 +9,7 @@ import threading
 import time
 from dataclasses import dataclass
 from fractions import Fraction
-from typing import Optional, Set
+from typing import Optional, Set, Callable, Awaitable, Any, BinaryIO
 
 import av
 from av.video.frame import PictureType
@@ -21,12 +21,11 @@ _LOG = logging.getLogger(__name__)
 
 _OUT_TIME_BASE = Fraction(1, 90_000)
 _READ_CHUNK = 64 * 1024
+_DRAIN_TIMEOUT_S = 5.0
 _STOP = object()
 
 
-def _fraction_from_time_base(time_base: Fraction) -> Fraction:
-    if isinstance(time_base, Fraction):
-        return time_base
+def _fraction_from_time_base(time_base: object) -> Fraction:
     numerator = getattr(time_base, "numerator", None)
     denominator = getattr(time_base, "denominator", None)
     if numerator is not None and denominator is not None:
@@ -40,14 +39,7 @@ def _rescale_pts(pts: int, src_tb: Fraction, dst_tb: Fraction) -> int:
     return int(round(float((Fraction(pts) * src_tb) / dst_tb)))
 
 
-def _normalize_fps(fps: Optional[float], *, time_base: Optional[Fraction]) -> int:
-    if fps is None and time_base is not None:
-        try:
-            tb = _fraction_from_time_base(time_base)
-            if float(tb) > 0:
-                fps = 1.0 / float(tb)
-        except Exception:
-            fps = None
+def _normalize_fps(fps: Optional[float]) -> int:
     if fps is None or not math.isfinite(fps) or fps <= 0:
         fps = 30.0
     return max(1, int(round(fps)))
@@ -58,6 +50,7 @@ class MediaPublishConfig:
     fps: Optional[float] = None
     mime_type: str = "video/mp2t"
     keyframe_interval_s: float = 2.0
+    on_segment_error: Optional[Callable[[int, BaseException], None]] = None
 
 
 class MediaPublish:
@@ -65,16 +58,18 @@ class MediaPublish:
         self,
         publish_url: str,
         *,
-        mime_type: str = "video/mp2t",
-        keyframe_interval_s: float = 2.0,
-        fps: Optional[float] = None,
+        config: MediaPublishConfig = MediaPublishConfig(),
     ) -> None:
         self.publish_url = publish_url
-        self._publisher = TricklePublisher(publish_url, mime_type)
-        self._keyframe_interval_s = float(keyframe_interval_s)
-        self._fps_hint = fps
+        self._publisher = TricklePublisher(
+            publish_url,
+            config.mime_type,
+            on_segment_error=config.on_segment_error,
+        )
+        self._keyframe_interval_s = float(config.keyframe_interval_s)
+        self._fps_hint = config.fps
 
-        self._queue: queue.Queue[object] = queue.Queue()
+        self._queue: queue.Queue[object] = queue.Queue(maxsize=1)
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._segment_tasks: Set[asyncio.Task[None]] = set()
@@ -96,30 +91,83 @@ class MediaPublish:
         if not isinstance(frame, av.VideoFrame):
             raise TypeError(f"write_frame expects av.VideoFrame, got {type(frame).__name__}")
         if self._error:
-            raise LivepeerGatewayError(f"MediaPublish encoder failed: {self._error}") from self._error
+            raise LivepeerGatewayError(f"MediaPublish failed: {self._error}") from self._error
 
         if self._loop is None:
             self._loop = asyncio.get_running_loop()
 
         self._ensure_thread()
-        await asyncio.to_thread(self._queue.put, frame)
+        self._put_queue(frame)
+
+    def _put_queue(self, item: object) -> None:
+        """Enqueue *item* with prefer-latest semantics.
+
+        Bounded queue (maxsize=1): if full, drop the oldest frame so the
+        encoder always receives the most recent input. The _STOP sentinel is
+        never discarded -- if encountered while draining, re-enqueue _STOP and
+        drop the incoming item.
+        """
+        if self._closed and item is not _STOP:
+            return
+
+        max_retries = 10
+        for _ in range(max_retries):
+            try:
+                self._queue.put_nowait(item)
+                return
+            except queue.Full:
+                if self._closed and item is not _STOP:
+                    return
+                try:
+                    old = self._queue.get_nowait()
+                except queue.Empty:
+                    continue
+                if old is _STOP:
+                    # We dequeued shutdown while making room. Prioritize
+                    # re-enqueueing _STOP and drop whatever item we were
+                    # attempting to queue (prefer shutdown over new input).
+                    item = _STOP
+                    continue
+        _LOG.error("MediaPublish _put_queue exceeded retry limit (%d); dropping item", max_retries)
+
+    async def _suppress_close_step(self, step_name: str, awaitable: Awaitable[Any]) -> None:
+        try:
+            await awaitable
+        except Exception:
+            _LOG.warning("MediaPublish close suppressed %s failure", step_name, exc_info=True)
 
     async def close(self) -> None:
         if self._closed:
             return
         self._closed = True
 
+        # Close is best-effort; capture any errors, log them and move on.
+        # Intentionally step-wise: each shutdown action has its own
+        # suppression so one failure does not prevent later cleanup.
         if self._thread is not None:
-            await asyncio.to_thread(self._queue.put, _STOP)
-            await asyncio.to_thread(self._thread.join)
+            await self._suppress_close_step("sentinel enqueue", asyncio.to_thread(self._put_queue, _STOP))
+            await self._suppress_close_step("encoder join", asyncio.to_thread(self._thread.join, 2.0))
+            if self._thread.is_alive():
+                _LOG.warning("MediaPublish encoder thread still alive after join timeout")
 
+        # Segment tasks may be blocked writing into trickle when the network
+        # path is unhealthy; cancel them first so the close stays bounded.
+        for task in list(self._segment_tasks):
+            task.cancel()
         if self._segment_tasks:
-            await asyncio.gather(*list(self._segment_tasks), return_exceptions=True)
+            await self._suppress_close_step(
+                "segment task gather",
+                asyncio.gather(*list(self._segment_tasks), return_exceptions=True),
+            )
 
-        await self._publisher.close()
+        await self._suppress_close_step("publisher close", self._publisher.close())
 
         if self._error:
-            raise LivepeerGatewayError("MediaPublish encoder failed") from self._error
+            _LOG.warning(
+                "MediaPublish close suppressed prior publish failure: %s",
+                self._error,
+                exc_info=(type(self._error), self._error, self._error.__traceback__),
+            )
 
     def _ensure_thread(self) -> None:
         with self._start_lock:
@@ -136,7 +184,7 @@ class MediaPublish:
         try:
             while True:
                 item = self._queue.get()
-                if item is _STOP:
+                if item is _STOP or self._error is not None:
                     break
                 frame = item
                 if self._container is None:
@@ -193,7 +241,7 @@ class MediaPublish:
             "pix_fmt": "yuv420p",
         }
 
-        rounded_fps = _normalize_fps(self._fps_hint, time_base=first_frame.time_base)
+        rounded_fps = _normalize_fps(self._fps_hint)
         self._video_stream = self._container.add_stream("libx264", rate=rounded_fps, options=video_opts, **video_kwargs)
 
     def _encode_frame(self, frame: av.VideoFrame) -> None:
@@ -248,7 +296,7 @@ class MediaPublish:
         current_time_s = now - self._wallclock_start
         return current_time_s, int(current_time_s * _OUT_TIME_BASE.denominator)
 
-    def _schedule_pipe_reader(self, read_file: object) -> None:
+    def _schedule_pipe_reader(self, read_file: BinaryIO) -> None:
         def _start() -> None:
             task = self._loop.create_task(self._stream_pipe_to_trickle(read_file))
             self._segment_tasks.add(task)
@@ -256,19 +304,67 @@ class MediaPublish:
 
         self._loop.call_soon_threadsafe(_start)
 
-    async def _stream_pipe_to_trickle(self, read_file: object) -> None:
+    def _handle_stream_segment_failure(self, seq: int) -> None:
+        terminal = self._publisher.terminal_error()
+        if terminal is not None:
+            if self._error is None:
+                err = LivepeerGatewayError(
+                    "MediaPublish terminal failure while streaming segment data"
+                )
+                err.__cause__ = terminal
+                self._error = err
+            _LOG.error("MediaPublish terminal failure while streaming", exc_info=True)
+            return
+        _LOG.warning("MediaPublish dropped segment seq=%s", seq, exc_info=True)
+
+    async def _stream_pipe_to_trickle(self, read_file: BinaryIO) -> None:
         try:
-            async with await self._publisher.next() as segment:
+            segment = await self._publisher.next()
+        except LivepeerGatewayError as e:
+            # At this point, publisher.next() has exhausted its retries
+            if self._error is None:
+                # Error will be picked up on the next frame write
+                err = LivepeerGatewayError(
+                    "MediaPublish terminal failure while opening next segment"
+                )
+                err.__cause__ = e
+                self._error = err
+            _LOG.error("MediaPublish terminal failure", exc_info=True)
+            await self._drain_pipe(read_file)
+            return
+
+        try:
+            async with segment:
                 while True:
                     chunk = await asyncio.to_thread(read_file.read, _READ_CHUNK)
                     if not chunk:
                         break
+                    # NB: the segment writer has its own chunk timeout, so
+                    # lean on that instead of doing that here
                     await segment.write(chunk)
         except Exception:
-            _LOG.error("MediaPublish pipe stream failed", exc_info=True)
+            # Couldn't publish the current segment for some reason.
+            self._handle_stream_segment_failure(segment.seq())
+            await self._drain_pipe(read_file)
         finally:
+            # This block is critical for clean-up safety; always close file
+            # Because not all exceptions will be caught (eg, CancelledError)
             try:
                 read_file.close()
             except Exception:
                 pass
+
+    async def _drain_pipe(self, read_file: BinaryIO) -> None:
+        async def _drain() -> None:
+            while True:
+                chunk = await asyncio.to_thread(read_file.read, _READ_CHUNK)
+                if not chunk:
+                    break
+
+        # Best-effort cleanup: absorb TimeoutError and CancelledError
+        # so drain never blocks shutdown
+        try:
+            await asyncio.wait_for(_drain(), timeout=_DRAIN_TIMEOUT_S)
+        except BaseException:
+            pass
 

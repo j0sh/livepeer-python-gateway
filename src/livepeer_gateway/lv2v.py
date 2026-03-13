@@ -141,12 +141,7 @@ class LiveVideoToVideo:
         if not self.publish_url:
             raise LivepeerGatewayError("No publish_url present on this LiveVideoToVideo job")
         if self._media is None:
-            media = MediaPublish(
-                self.publish_url,
-                mime_type=config.mime_type,
-                keyframe_interval_s=config.keyframe_interval_s,
-                fps=config.fps,
-            )
+            media = MediaPublish(self.publish_url, config=config)
             object.__setattr__(self, "_media", media)
         return self._media
 
