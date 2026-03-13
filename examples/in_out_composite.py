@@ -231,32 +231,32 @@ async def main() -> None:
     async def _subscribe_output() -> None:
         if job is None:
             return
-        output = job.media_output()
-        async for decoded in output.frames():
-            if stop_async.is_set():
-                break
-            if decoded.kind != "video":
-                continue
-            try:
-                img = _bgr_from_frame(decoded.frame)
-            except Exception:
-                continue
-            _update_out(img, decoded.pts_time)
+        async with job.media_output() as output:
+            async for decoded in output.frames():
+                if stop_async.is_set():
+                    break
+                if decoded.kind != "video":
+                    continue
+                try:
+                    img = _bgr_from_frame(decoded.frame)
+                except Exception:
+                    continue
+                _update_out(img, decoded.pts_time)
 
     async def _subscribe_loopback() -> None:
         if job is None or not job.publish_url:
             return
-        loopback = MediaOutput(job.publish_url)
-        async for decoded in loopback.frames():
-            if stop_async.is_set():
-                break
-            if decoded.kind != "video":
-                continue
-            try:
-                img = _bgr_from_frame(decoded.frame)
-            except Exception:
-                continue
-            _update_loop(img, decoded.pts_time)
+        async with MediaOutput(job.publish_url) as loopback:
+            async for decoded in loopback.frames():
+                if stop_async.is_set():
+                    break
+                if decoded.kind != "video":
+                    continue
+                try:
+                    img = _bgr_from_frame(decoded.frame)
+                except Exception:
+                    continue
+                _update_loop(img, decoded.pts_time)
 
     async def _display_loop() -> None:
         title = "input | loopback | output | empty (press q to quit)"

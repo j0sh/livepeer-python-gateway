@@ -164,9 +164,9 @@ async def _write_media_output(job, output: str) -> None:
         close_out = True
 
     try:
-        sub = job.media_output()
-        async for chunk in sub.bytes():
-            await asyncio.to_thread(out.write, chunk)
+        async with job.media_output() as sub:
+            async for chunk in sub.bytes():
+                await asyncio.to_thread(out.write, chunk)
     finally:
         if close_out:
             out.close()
@@ -177,6 +177,7 @@ async def main() -> None:
     args = _parse_args()
     job = None
     input_ = None
+    capture_thread: threading.Thread | None = None
     stop_event = threading.Event()
     output_task: asyncio.Task[None] | None = None
 
@@ -244,6 +245,10 @@ async def main() -> None:
         print(f"Error processing frame: {e}")
     finally:
         stop_event.set()
+        if capture_thread is not None and capture_thread.is_alive():
+            # Let the capture thread observe stop_event and exit before closing
+            # the input to avoid concurrent decode/close races in PyAV.
+            await asyncio.to_thread(capture_thread.join, 2.0)
         if output_task is not None:
             output_task.cancel()
             with suppress(asyncio.CancelledError):
