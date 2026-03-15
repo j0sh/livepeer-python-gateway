@@ -195,16 +195,23 @@ async def main() -> None:
     latest = {
         "cam_img": None,
         "cam_pts_time": None,
+        "cam_fps": None,
         "loop_img": None,
         "loop_pts_time": None,
+        "loop_fps": None,
         "out_img": None,
         "out_pts_time": None,
+        "out_fps": None,
     }
     latest_lock = threading.Lock()
     avg_window_s = max(0.1, float(args.avg_window))
+    fps_window_s = 1.0
     rtt_samples: "deque[tuple[float, float]]" = deque()
     total_samples: "deque[tuple[float, float]]" = deque()
     inference_samples: "deque[tuple[float, float]]" = deque()
+    cam_frame_times: "deque[float]" = deque()
+    loop_frame_times: "deque[float]" = deque()
+    out_frame_times: "deque[float]" = deque()
 
     def _push_avg(samples: "deque[tuple[float, float]]", now: float, value: float) -> float:
         samples.append((now, value))
@@ -213,20 +220,30 @@ async def main() -> None:
             samples.popleft()
         return sum(v for _, v in samples) / len(samples)
 
+    def _push_fps(samples: "deque[float]", now: float) -> float:
+        samples.append(now)
+        cutoff = now - fps_window_s
+        while samples and samples[0] < cutoff:
+            samples.popleft()
+        return float(len(samples)) / fps_window_s
+
     def _update_cam(img, pts_time: Optional[float]) -> None:
         with latest_lock:
             latest["cam_img"] = img
             latest["cam_pts_time"] = pts_time
+            latest["cam_fps"] = _push_fps(cam_frame_times, time.monotonic())
 
     def _update_out(img, pts_time: Optional[float]) -> None:
         with latest_lock:
             latest["out_img"] = img
             latest["out_pts_time"] = pts_time
+            latest["out_fps"] = _push_fps(out_frame_times, time.monotonic())
 
     def _update_loop(img, pts_time: Optional[float]) -> None:
         with latest_lock:
             latest["loop_img"] = img
             latest["loop_pts_time"] = pts_time
+            latest["loop_fps"] = _push_fps(loop_frame_times, time.monotonic())
 
     async def _subscribe_output() -> None:
         if job is None:
@@ -265,9 +282,12 @@ async def main() -> None:
                 cam_img = latest["cam_img"]
                 out_img = latest["out_img"]
                 cam_pts_time = latest["cam_pts_time"]
+                cam_fps = latest["cam_fps"]
                 out_pts_time = latest["out_pts_time"]
+                out_fps = latest["out_fps"]
                 loop_img = latest["loop_img"]
                 loop_pts_time = latest["loop_pts_time"]
+                loop_fps = latest["loop_fps"]
 
             if cam_img is not None:
                 base_img = cam_img
@@ -304,6 +324,9 @@ async def main() -> None:
                     inference_label = f"Inference: {inference_s:+.3f}s (avg {inference_avg:+.3f}s)"
                 else:
                     inference_label = "Inference: n/a"
+                input_fps_label = f"FPS: {cam_fps:.1f}" if cam_fps is not None else "FPS: n/a"
+                loop_fps_label = f"FPS: {loop_fps:.1f}" if loop_fps is not None else "FPS: n/a"
+                out_fps_label = f"FPS: {out_fps:.1f}" if out_fps is not None else "FPS: n/a"
 
                 input_tile = _letterbox_to_square(cam_img, tile_size)
                 loop_tile = _letterbox_to_square(loop_img, tile_size)
@@ -311,19 +334,19 @@ async def main() -> None:
                 empty_tile = _letterbox_to_square(None, tile_size)
 
                 if cam_img is None:
-                    _draw_labels(input_tile, ["CAMERA PENDING"])
+                    _draw_labels(input_tile, ["CAMERA PENDING", input_fps_label])
                 else:
-                    _draw_labels(input_tile, ["INPUT"])
+                    _draw_labels(input_tile, ["INPUT", input_fps_label])
 
                 if loop_img is None:
-                    _draw_labels(loop_tile, ["LOOPBACK PENDING"])
+                    _draw_labels(loop_tile, ["LOOPBACK PENDING", loop_fps_label])
                 else:
-                    _draw_labels(loop_tile, ["LOOPBACK", rtt_label])
+                    _draw_labels(loop_tile, ["LOOPBACK", loop_fps_label, rtt_label])
 
                 if out_img is None:
-                    _draw_labels(out_tile, ["OUTPUT PENDING"])
+                    _draw_labels(out_tile, ["OUTPUT PENDING", out_fps_label])
                 else:
-                    _draw_labels(out_tile, ["OUTPUT", inference_label, total_label])
+                    _draw_labels(out_tile, ["OUTPUT", out_fps_label, inference_label, total_label])
 
                 _draw_labels(empty_tile, ["EMPTY"])
 
