@@ -26,6 +26,7 @@ _LOG = logging.getLogger(__name__)
 _OUT_TIME_BASE = Fraction(1, 90_000)
 _READ_CHUNK = 64 * 1024
 _DRAIN_TIMEOUT_S = 5.0
+_PUBLISH_SUMMARY_INTERVAL_S = 10.0
 _STOP = object()
 
 
@@ -79,6 +80,19 @@ class MediaPublish:
 
         self._closed = False
         self._error: Optional[BaseException] = None
+        self._started_at = time.time()
+        self._last_summary_at = self._started_at
+        self._stats: dict[str, int] = {
+            "frames_in": 0,
+            "frames_dropped_before_encode": 0,
+            "segments_started": 0,
+            "segments_completed": 0,
+            "segments_failed": 0,
+            "terminal_failures": 0,
+            "bytes_streamed_to_trickle": 0,
+            "segment_writer_put_timeouts": 0,
+            "encoder_errors": 0,
+        }
 
         # Encoder state (owned by the encoder thread).
         self._container: Optional[av.container.OutputContainer] = None
@@ -99,6 +113,7 @@ class MediaPublish:
             self._loop = asyncio.get_running_loop()
 
         self._ensure_thread()
+        self._stats["frames_in"] += 1
         self._put_queue(frame)
 
     def _put_queue(self, item: object) -> None:
@@ -130,7 +145,11 @@ class MediaPublish:
                     # attempting to queue (prefer shutdown over new input).
                     item = _STOP
                     continue
+                if item is not _STOP:
+                    self._stats["frames_dropped_before_encode"] += 1
         _LOG.error("MediaPublish _put_queue exceeded retry limit (%d); dropping item", max_retries)
+        if item is not _STOP:
+            self._stats["frames_dropped_before_encode"] += 1
 
     async def _suppress_close_step(self, step_name: str, awaitable: Awaitable[Any]) -> None:
         try:
@@ -170,6 +189,7 @@ class MediaPublish:
                 self._error,
                 exc_info=(type(self._error), self._error, self._error.__traceback__),
             )
+        self._log_publish_summary(prefix="close")
 
     def _ensure_thread(self) -> None:
         with self._start_lock:
@@ -196,6 +216,7 @@ class MediaPublish:
             self._flush_encoder()
         except Exception as e:
             self._error = e
+            self._stats["encoder_errors"] += 1
             _LOG.error("MediaPublish encoder error", exc_info=True)
         finally:
             if self._container is not None:
@@ -311,23 +332,31 @@ class MediaPublish:
         try:
             segment = await self._publisher.next()
             segment_seq = segment.seq()
+            self._stats["segments_started"] += 1
             async with segment:
                 while True:
                     chunk = await asyncio.to_thread(read_file.read, _READ_CHUNK)
                     if not chunk:
                         break
+                    self._stats["bytes_streamed_to_trickle"] += len(chunk)
                     # NB: the segment writer has its own chunk timeout, so
                     # lean on that instead of doing that here
                     await segment.write(chunk)
+            self._stats["segments_completed"] += 1
+            self._maybe_log_publish_summary()
         except TricklePublisherTerminalError as e:
             # At this point, publisher.next() has exhausted its retries and the
             # publisher cannot be used for future segments.
             if self._error is None:
                 self._error = e
+            self._stats["segments_failed"] += 1
+            self._stats["terminal_failures"] += 1
             _LOG.error("MediaPublish terminal failure while streaming", exc_info=True)
         except TrickleSegmentWriteError:
+            self._stats["segments_failed"] += 1
             _LOG.warning("MediaPublish dropped segment seq=%s", segment_seq, exc_info=True)
         except Exception:
+            self._stats["segments_failed"] += 1
             _LOG.exception(
                 "MediaPublish unexpected failure while streaming segment seq=%s",
                 segment_seq,
@@ -354,4 +383,43 @@ class MediaPublish:
             await asyncio.wait_for(_drain(), timeout=_DRAIN_TIMEOUT_S)
         except BaseException:
             pass
+
+    def _maybe_log_publish_summary(self) -> None:
+        now = time.time()
+        if now - self._last_summary_at >= _PUBLISH_SUMMARY_INTERVAL_S:
+            self._last_summary_at = now
+            self._log_publish_summary(prefix="periodic")
+
+    def _log_publish_summary(self, *, prefix: str) -> None:
+        publisher_stats = self._publisher.get_stats()
+        elapsed_s = max(0.0, time.time() - self._started_at)
+        _LOG.info(
+            "MediaPublish summary (%s): elapsed=%.1fs "
+            "frames_in=%d frames_dropped_before_encode=%d "
+            "segments_started=%d segments_completed=%d segments_failed=%d "
+            "bytes_streamed_to_trickle=%d "
+            "post_attempts=%d post_retries_no_body_consumed=%d post_http_failures=%d "
+            "post_exceptions=%d post_404=%d segment_writer_put_timeouts=%d "
+            "terminal_failures=%d encoder_errors=%d terminal_error=%s",
+            prefix,
+            elapsed_s,
+            self._stats["frames_in"],
+            self._stats["frames_dropped_before_encode"],
+            self._stats["segments_started"],
+            self._stats["segments_completed"],
+            self._stats["segments_failed"],
+            self._stats["bytes_streamed_to_trickle"],
+            publisher_stats.get("post_attempts", 0),
+            publisher_stats.get("post_retries_no_body_consumed", 0),
+            publisher_stats.get("post_http_failures", 0),
+            publisher_stats.get("post_exceptions", 0),
+            publisher_stats.get("post_404", 0),
+            publisher_stats.get("segment_writer_put_timeouts", 0),
+            max(
+                self._stats["terminal_failures"],
+                int(publisher_stats.get("terminal_failures", 0)),
+            ),
+            self._stats["encoder_errors"],
+            publisher_stats.get("terminal_error", False),
+        )
 

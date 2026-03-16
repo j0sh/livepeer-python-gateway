@@ -6,6 +6,7 @@ Helpers for consuming trickle media outputs as segments, bytes, or frames.
 
 import asyncio
 import logging
+import time
 from enum import Enum
 from contextlib import suppress
 from typing import AsyncIterator, Optional
@@ -24,6 +25,7 @@ from .segment_reader import SegmentReader
 from .trickle_subscriber import TrickleSubscriber
 
 _LOG = logging.getLogger(__name__)
+_MEDIA_OUTPUT_SUMMARY_INTERVAL_S = 10.0
 
 class LagPolicy(Enum):
     """
@@ -96,6 +98,22 @@ class MediaOutput:
         self._eos = False
         self._next_local_seq = 0
         self._base_seq = 0
+        self._started_at = time.time()
+        self._last_summary_at = self._started_at
+        self._stats: dict[str, int] = {
+            "segments_consumed": 0,
+            "bytes_read": 0,
+            "chunks_read": 0,
+            "content_type_errors": 0,
+            "segment_read_errors": 0,
+            "segment_max_bytes_exceeded": 0,
+            "consumer_lag_skip_latest": 0,
+            "consumer_lag_retry_earliest": 0,
+            "consumer_lag_fail": 0,
+            "video_frames_decoded": 0,
+            "audio_frames_decoded": 0,
+            "decode_errors": 0,
+        }
 
     def segments(
         self,
@@ -152,6 +170,7 @@ class MediaOutput:
                     item = await asyncio.to_thread(output.get)
                     err = decoder_error(item)
                     if err is not None:
+                        self._stats["decode_errors"] += 1
                         raise LivepeerGatewayError(
                             f"Media decode error: {err.__class__.__name__}: {err}"
                         ) from err
@@ -162,6 +181,11 @@ class MediaOutput:
                                 raise exc
                         break
                     if isinstance(item, DecodedMediaFrame):
+                        if item.kind == "video":
+                            self._stats["video_frames_decoded"] += 1
+                        elif item.kind == "audio":
+                            self._stats["audio_frames_decoded"] += 1
+                        self._maybe_log_summary()
                         yield item
             finally:
                 decoder.stop()
@@ -181,14 +205,27 @@ class MediaOutput:
         segment = await self._next_segment(seq)
         while segment is not None:
             if not checked_content_type:
-                _require_mpegts_content_type(segment.headers().get("Content-Type"))
+                try:
+                    _require_mpegts_content_type(segment.headers().get("Content-Type"))
+                except Exception:
+                    self._stats["content_type_errors"] += 1
+                    raise
                 checked_content_type = True
             reader = segment.make_reader()
+            self._stats["segments_consumed"] += 1
             while True:
                 chunk = await reader.read(chunk_size=self.chunk_size)
                 if not chunk:
                     break
+                self._stats["chunks_read"] += 1
+                self._stats["bytes_read"] += len(chunk)
                 yield chunk
+            segment_stats = segment.get_stats()
+            self._stats["segment_read_errors"] += segment_stats.get("read_errors", 0)
+            self._stats["segment_max_bytes_exceeded"] += segment_stats.get(
+                "max_bytes_exceeded", 0
+            )
+            self._maybe_log_summary()
             # Use the returned segment's local seq in case we skipped ahead.
             seq = segment._local_seq + 1
             segment = await self._next_segment(seq)
@@ -211,16 +248,19 @@ class MediaOutput:
             relative = seq - self._base_seq
             if relative < 0:
                 if self.on_lag is LagPolicy.FAIL:
+                    self._stats["consumer_lag_fail"] += 1
                     raise LivepeerGatewayError(
                         "consumer fell behind segment window"
                     )
                 if self._segments:
                     if self.on_lag is LagPolicy.EARLIEST:
+                        self._stats["consumer_lag_retry_earliest"] += 1
                         _LOG.warning(
                             "MediaOutput consumer fell behind segment window; "
                             "retrying from earliest"
                         )
                         return self._segments[0]
+                    self._stats["consumer_lag_skip_latest"] += 1
                     _LOG.warning(
                         "MediaOutput consumer fell behind segment window; "
                         "skipping to latest"
@@ -262,6 +302,7 @@ class MediaOutput:
             return None
 
     async def close(self) -> None:
+        self._log_summary(prefix="close")
         for segment in self._segments:
             await segment.close()
         if self._sub is not None:
@@ -272,6 +313,44 @@ class MediaOutput:
 
     async def __aexit__(self, exc_type, exc_value, traceback) -> None:
         await self.close()
+
+    def _maybe_log_summary(self) -> None:
+        now = time.time()
+        if now - self._last_summary_at >= _MEDIA_OUTPUT_SUMMARY_INTERVAL_S:
+            self._last_summary_at = now
+            self._log_summary(prefix="periodic")
+
+    def _log_summary(self, *, prefix: str) -> None:
+        sub_stats = self._sub.get_stats() if self._sub is not None else {}
+        _LOG.info(
+            "MediaOutput summary (%s): elapsed=%.1fs segments_consumed=%d "
+            "bytes_read=%d chunks_read=%d content_type_errors=%d "
+            "segment_read_errors=%d segment_max_bytes_exceeded=%d "
+            "consumer_lag_skip_latest=%d consumer_lag_retry_earliest=%d "
+            "consumer_lag_fail=%d video_frames_decoded=%d audio_frames_decoded=%d "
+            "decode_errors=%d sub_get_attempts=%d sub_get_retries=%d sub_get_failures=%d "
+            "sub_get_404_eos=%d sub_get_470_reset=%d sub_seq_gap_events=%d",
+            prefix,
+            max(0.0, time.time() - self._started_at),
+            self._stats["segments_consumed"],
+            self._stats["bytes_read"],
+            self._stats["chunks_read"],
+            self._stats["content_type_errors"],
+            self._stats["segment_read_errors"],
+            self._stats["segment_max_bytes_exceeded"],
+            self._stats["consumer_lag_skip_latest"],
+            self._stats["consumer_lag_retry_earliest"],
+            self._stats["consumer_lag_fail"],
+            self._stats["video_frames_decoded"],
+            self._stats["audio_frames_decoded"],
+            self._stats["decode_errors"],
+            sub_stats.get("get_attempts", 0),
+            sub_stats.get("get_retries", 0),
+            sub_stats.get("get_failures", 0),
+            sub_stats.get("get_404_eos", 0),
+            sub_stats.get("get_470_reset", 0),
+            sub_stats.get("seq_gap_events", 0),
+        )
 
 
 def _normalize_content_type(value: Optional[str]) -> Optional[str]:

@@ -38,6 +38,12 @@ class _SegmentBuffer:
         self._buf = bytearray()
         self._eof = False
         self._error: Optional[BaseException] = None
+        self._stats: dict[str, int] = {
+            "chunks_read": 0,
+            "bytes_read": 0,
+            "read_errors": 0,
+            "max_bytes_exceeded": 0,
+        }
 
         self._lock = asyncio.Lock()
         self._cond = asyncio.Condition(self._lock)
@@ -57,7 +63,15 @@ class _SegmentBuffer:
                 if self._error is not None or self._eof:
                     return
 
-            chunk = await self.source.read(self.producer_read_size)
+            try:
+                chunk = await self.source.read(self.producer_read_size)
+            except Exception as exc:
+                async with self._cond:
+                    self._stats["read_errors"] += 1
+                    self._error = exc
+                    self._eof = True
+                    self._cond.notify_all()
+                return
 
             async with self._cond:
                 if not chunk:
@@ -66,8 +80,11 @@ class _SegmentBuffer:
                     return
 
                 self._buf.extend(chunk)
+                self._stats["chunks_read"] += 1
+                self._stats["bytes_read"] += len(chunk)
 
                 if self.max_bytes is not None and len(self._buf) > self.max_bytes:
+                    self._stats["max_bytes_exceeded"] += 1
                     self._error = ValueError(
                         f"Trickle segment exceeds max size ({len(self._buf)} > {self.max_bytes})"
                     )
@@ -185,3 +202,8 @@ class SegmentReader:
         if not self.response.closed:
             self.response.release()
             self.response.close()
+
+    def get_stats(self) -> dict:
+        stats = dict(self._writer._stats)
+        stats["segment_seq"] = self.seq()
+        return stats
