@@ -7,7 +7,6 @@ import socket
 import ssl
 import tempfile
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import Optional, Tuple
 from urllib.parse import urlparse
 
@@ -19,6 +18,17 @@ from .errors import LivepeerGatewayError
 from .remote_signer import _freeze_headers, get_orch_info_sig
 
 _LOG = logging.getLogger(__name__)
+
+# Per-target TOFU certificate cache.
+#
+# Livepeer orchestrators often run with self-signed TLS certificates that are
+# regenerated on process startup. In a trust-on-first-use (TOFU) model we pin
+# the certificate we see on first contact for a target (host:port), then reuse
+# it for subsequent gRPC calls.
+#
+# We intentionally use a dict (not @lru_cache) so we can evict a single target
+# when we detect a restarted orchestrator presenting a new certificate.
+_TOFU_CERT_CACHE: dict[str, Tuple[bytes, str]] = {}
 
 
 @dataclass
@@ -112,8 +122,31 @@ def get_orch_info(
     if capabilities is not None:
         request.capabilities.CopyFrom(capabilities)
 
-    _, stub = create_orchestrator_stub(orch_url)
-    return call_get_orchestrator(stub, request, orch_url)
+    # Retry once on certificate verification failures.
+    #
+    # Why this exists:
+    # - TOFU pins the cert we first observed for a target.
+    # - Some orchestrators regenerate self-signed certs on startup.
+    # - After restart, the pinned cert is stale, and gRPC reports
+    #   CERTIFICATE_VERIFY_FAILED during the next RPC.
+    #
+    # On that specific failure we evict the cached TOFU cert for this target
+    # and retry once so we can probe and trust the new certificate.
+    target = _parse_grpc_target(orch_url)
+    for attempt in range(2):
+        _, stub = create_orchestrator_stub(orch_url)
+        try:
+            return call_get_orchestrator(stub, request, orch_url)
+        except OrchestratorRpcError as e:
+            if attempt == 0 and _is_cert_verify_error(e):
+                _LOG.info(
+                    "Orchestrator %s TLS cert changed (likely restarted); "
+                    "evicting cached TOFU cert and retrying once",
+                    orch_url,
+                )
+                _evict_tofu_cache(target)
+                continue
+            raise
 
 
 def _split_host_port(target: str) -> Tuple[str, int]:
@@ -215,8 +248,19 @@ def _decode_pem_cert(pem: bytes) -> dict:
                 pass
 
 
-@lru_cache(maxsize=None)
-def _trust_on_first_use_root_cert_target(target: str) -> Tuple[bytes, str]:
+def _is_cert_verify_error(err: BaseException) -> bool:
+    """
+    Detect gRPC TLS failures caused by a changed orchestrator certificate.
+
+    We are specifically interested in CERTIFICATE_VERIFY_FAILED because it
+    indicates our pinned TOFU cert no longer matches what the orchestrator now
+    presents (commonly after orchestrator restart with a regenerated self-signed
+    cert).
+    """
+    return "CERTIFICATE_VERIFY_FAILED" in str(err)
+
+
+def _fetch_tofu_root_cert_for_target(target: str) -> Tuple[bytes, str]:
     """
     Fetch the server certificate via a TLS handshake with verification disabled,
     then "trust" that exact certificate by using it as the root cert for gRPC.
@@ -246,6 +290,31 @@ def _trust_on_first_use_root_cert_target(target: str) -> Tuple[bytes, str]:
     decoded = _decode_pem_cert(pem)
     authority = _pick_cert_authority(decoded) or host
     return pem, authority
+
+
+def _trust_on_first_use_root_cert_target(target: str) -> Tuple[bytes, str]:
+    """
+    Return cached TOFU trust material for a target, probing if needed.
+
+    The cache key is the normalized gRPC target (host:port or [ipv6]:port).
+    """
+    cached = _TOFU_CERT_CACHE.get(target)
+    if cached is not None:
+        return cached
+
+    trust_material = _fetch_tofu_root_cert_for_target(target)
+    _TOFU_CERT_CACHE[target] = trust_material
+    return trust_material
+
+
+def _evict_tofu_cache(target: str) -> None:
+    """
+    Evict cached TOFU trust material for a single target.
+
+    This is used on CERTIFICATE_VERIFY_FAILED so the next connection can
+    re-probe the orchestrator and trust its newly generated certificate.
+    """
+    _TOFU_CERT_CACHE.pop(target, None)
 
 
 def _trust_on_first_use_root_cert(orch_url: str) -> Tuple[bytes, str, str]:
