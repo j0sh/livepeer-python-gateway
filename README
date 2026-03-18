@@ -1,17 +1,23 @@
 Generate protobufs:
 
 ```
+uv sync --extra dev
 uv run generate-lp-rpc
 ```
 
-Examples
+## Usage Examples
 
-Offchain mode (no remote signer)
+First install dependencies for example code
+```
+uv sync --extra examples
+```
+
+Get orchestrator info, offchain mode
 ```
 uv run examples/get_orchestrator_info.py localhost:8935
 ```
 
-On-chain mode
+On-chain mode with a remote signer
 
 ```
 uv run examples/get_orchestrator_info.py --signer "<signer-host:port>"
@@ -71,7 +77,7 @@ job = start_lv2v(
 )
 ```
 
-Token schema (base64-encoded JSON object)
+## Token schema (base64-encoded JSON object)
 
 | Field | Type | Description |
 |---|---|---|
